@@ -1,0 +1,5613 @@
+From 6d7c563fbbd84711fa5239b7104c37093cda7851 Mon Sep 17 00:00:00 2001
+From: David Malcolm <dmalcolm@redhat.com>
+Date: Thu, 10 Oct 2024 09:06:43 -0400
+Subject: [PATCH 7/9] FIXME: WIP on get_desc -> print_desc
+
+---
+ gcc/analyzer/bounds-checking.cc               | 459 ++++++++++-------
+ gcc/analyzer/call-details.cc                  |  11 +-
+ gcc/analyzer/call-info.cc                     |  20 +-
+ gcc/analyzer/call-info.h                      |   6 +-
+ gcc/analyzer/checker-event.cc                 | 463 ++++++++----------
+ gcc/analyzer/checker-event.h                  |  46 +-
+ gcc/analyzer/checker-path.cc                  |   7 +-
+ gcc/analyzer/diagnostic-manager.cc            |   6 +-
+ gcc/analyzer/engine.cc                        |  63 +--
+ gcc/analyzer/infinite-loop.cc                 |  35 +-
+ gcc/analyzer/infinite-recursion.cc            |  38 +-
+ gcc/analyzer/kf.cc                            | 118 ++---
+ gcc/analyzer/pending-diagnostic.cc            |  25 -
+ gcc/analyzer/pending-diagnostic.h             |  67 ++-
+ gcc/analyzer/region-model.cc                  | 212 +++++---
+ gcc/analyzer/sm-fd.cc                         | 392 ++++++++++-----
+ gcc/analyzer/sm-file.cc                       |  93 ++--
+ gcc/analyzer/sm-malloc.cc                     | 350 ++++++++-----
+ gcc/analyzer/sm-sensitive.cc                  |  59 ++-
+ gcc/analyzer/sm-signal.cc                     |  24 +-
+ gcc/analyzer/sm-taint.cc                      | 315 +++++++-----
+ gcc/analyzer/varargs.cc                       | 127 +++--
+ gcc/diagnostic-format-json.cc                 |   8 +-
+ gcc/diagnostic-format-sarif.cc                |   8 +-
+ gcc/diagnostic-path.cc                        |  74 ++-
+ gcc/diagnostic-path.h                         |   6 +-
+ gcc/pretty-print.cc                           |  25 +
+ gcc/pretty-print.h                            |   5 +
+ gcc/selftest-diagnostic-path.h                |   4 +-
+ gcc/simple-diagnostic-path.cc                 |  10 +-
+ gcc/simple-diagnostic-path.h                  |   5 +-
+ .../gcc.dg/plugin/analyzer_cpython_plugin.c   |  19 +-
+ .../gcc.dg/plugin/analyzer_gil_plugin.c       |  54 +-
+ .../gcc.dg/plugin/diagnostic_group_plugin.c   |   3 +-
+ .../plugin/diagnostic_plugin_xhtml_format.c   |  10 +-
+ 35 files changed, 1868 insertions(+), 1299 deletions(-)
+
+diff --git a/gcc/analyzer/bounds-checking.cc b/gcc/analyzer/bounds-checking.cc
+index f8644addbfdc..e52a63ed9a24 100644
+--- a/gcc/analyzer/bounds-checking.cc
++++ b/gcc/analyzer/bounds-checking.cc
+@@ -410,20 +410,25 @@ public:
+     return warned;
+   }
+ 
+-  label_text describe_final_event (const evdesc::final_event &ev)
+-    final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &) final override
+   {
+     if (m_byte_bound || !m_bit_bound)
+       {
+ 	byte_range out_of_bounds_bytes (0, 0);
+ 	if (get_out_of_bounds_bytes (&out_of_bounds_bytes))
+-	  return describe_final_event_as_bytes (ev, out_of_bounds_bytes);
++	  {
++	    describe_final_event_as_bytes (pp, out_of_bounds_bytes);
++	    return true;
++	  }
+       }
+-    return describe_final_event_as_bits (ev);
++    describe_final_event_as_bits (pp);
++    return true;
+   }
+ 
+-  label_text
+-  describe_final_event_as_bytes (const evdesc::final_event &ev,
++  void
++  describe_final_event_as_bytes (pretty_printer &pp,
+ 				 const byte_range &out_of_bounds_bytes)
+   {
+     byte_size_t start = out_of_bounds_bytes.get_start_byte_offset ();
+@@ -436,27 +441,34 @@ public:
+     if (start == end)
+       {
+ 	if (m_diag_arg)
+-	  return ev.formatted_print ("out-of-bounds write at byte %s but %qE"
+-				     " ends at byte %E", start_buf, m_diag_arg,
+-				     m_byte_bound);
+-	return ev.formatted_print ("out-of-bounds write at byte %s but region"
+-				   " ends at byte %E", start_buf,
+-				   m_byte_bound);
++	  pp_printf (&pp,
++		     "out-of-bounds write at byte %s but %qE"
++		     " ends at byte %E", start_buf, m_diag_arg,
++		     m_byte_bound);
++	else
++	  pp_printf (&pp,
++		     "out-of-bounds write at byte %s but region"
++		     " ends at byte %E", start_buf,
++		     m_byte_bound);
+       }
+     else
+       {
+ 	if (m_diag_arg)
+-	  return ev.formatted_print ("out-of-bounds write from byte %s till"
+-				     " byte %s but %qE ends at byte %E",
+-				     start_buf, end_buf, m_diag_arg,
+-				     m_byte_bound);
+-	return ev.formatted_print ("out-of-bounds write from byte %s till"
+-				   " byte %s but region ends at byte %E",
+-				   start_buf, end_buf, m_byte_bound);
++	  pp_printf (&pp,
++		     "out-of-bounds write from byte %s till"
++		     " byte %s but %qE ends at byte %E",
++		     start_buf, end_buf, m_diag_arg,
++		     m_byte_bound);
++	else
++	  pp_printf (&pp,
++		     "out-of-bounds write from byte %s till"
++		     " byte %s but region ends at byte %E",
++		     start_buf, end_buf, m_byte_bound);
+       }
+   }
+ 
+-  label_text describe_final_event_as_bits (const evdesc::final_event &ev)
++  void
++  describe_final_event_as_bits (pretty_printer &pp)
+   {
+     bit_size_t start = m_out_of_bounds_bits.get_start_bit_offset ();
+     bit_size_t end = m_out_of_bounds_bits.get_last_bit_offset ();
+@@ -468,23 +480,29 @@ public:
+     if (start == end)
+       {
+ 	if (m_diag_arg)
+-	  return ev.formatted_print ("out-of-bounds write at bit %s but %qE"
+-				     " ends at bit %E", start_buf, m_diag_arg,
+-				     m_bit_bound);
+-	return ev.formatted_print ("out-of-bounds write at bit %s but region"
+-				   " ends at bit %E", start_buf,
+-				   m_bit_bound);
++	  pp_printf (&pp,
++		     "out-of-bounds write at bit %s but %qE"
++		     " ends at bit %E", start_buf, m_diag_arg,
++		     m_bit_bound);
++	else
++	  pp_printf (&pp,
++		     "out-of-bounds write at bit %s but region"
++		     " ends at bit %E", start_buf,
++		     m_bit_bound);
+       }
+     else
+       {
+ 	if (m_diag_arg)
+-	  return ev.formatted_print ("out-of-bounds write from bit %s till"
+-				     " bit %s but %qE ends at bit %E",
+-				     start_buf, end_buf, m_diag_arg,
+-				     m_bit_bound);
+-	return ev.formatted_print ("out-of-bounds write from bit %s till"
+-				   " bit %s but region ends at bit %E",
+-				   start_buf, end_buf, m_bit_bound);
++	  pp_printf (&pp,
++		     "out-of-bounds write from bit %s till"
++		     " bit %s but %qE ends at bit %E",
++		     start_buf, end_buf, m_diag_arg,
++		     m_bit_bound);
++	else
++	  pp_printf (&pp,
++		     "out-of-bounds write from bit %s till"
++		     " bit %s but region ends at bit %E",
++		     start_buf, end_buf, m_bit_bound);
+       }
+   }
+ 
+@@ -576,20 +594,25 @@ public:
+     return warned;
+   }
+ 
+-  label_text describe_final_event (const evdesc::final_event &ev)
+-    final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &) final override
+   {
+     if (m_byte_bound || !m_bit_bound)
+       {
+ 	byte_range out_of_bounds_bytes (0, 0);
+ 	if (get_out_of_bounds_bytes (&out_of_bounds_bytes))
+-	  return describe_final_event_as_bytes (ev, out_of_bounds_bytes);
++	  {
++	    describe_final_event_as_bytes (pp, out_of_bounds_bytes);
++	    return true;
++	  }
+       }
+-    return describe_final_event_as_bits (ev);
++    describe_final_event_as_bits (pp);
++    return true;
+   }
+ 
+-  label_text
+-  describe_final_event_as_bytes (const evdesc::final_event &ev,
++  void
++  describe_final_event_as_bytes (pretty_printer &pp,
+ 				 const byte_range &out_of_bounds_bytes)
+   {
+     byte_size_t start = out_of_bounds_bytes.get_start_byte_offset ();
+@@ -602,27 +625,34 @@ public:
+     if (start == end)
+       {
+ 	if (m_diag_arg)
+-	  return ev.formatted_print ("out-of-bounds read at byte %s but %qE"
+-				     " ends at byte %E", start_buf, m_diag_arg,
+-							 m_byte_bound);
+-	return ev.formatted_print ("out-of-bounds read at byte %s but region"
+-				   " ends at byte %E", start_buf,
+-						       m_byte_bound);
++	  pp_printf (&pp,
++		     "out-of-bounds read at byte %s but %qE"
++		     " ends at byte %E", start_buf, m_diag_arg,
++		     m_byte_bound);
++	else
++	  pp_printf (&pp,
++		     "out-of-bounds read at byte %s but region"
++		     " ends at byte %E", start_buf,
++		     m_byte_bound);
+       }
+     else
+       {
+ 	if (m_diag_arg)
+-	  return ev.formatted_print ("out-of-bounds read from byte %s till"
+-				     " byte %s but %qE ends at byte %E",
+-				     start_buf, end_buf, m_diag_arg,
+-				     m_byte_bound);
+-	return ev.formatted_print ("out-of-bounds read from byte %s till"
+-				   " byte %s but region ends at byte %E",
+-				   start_buf, end_buf, m_byte_bound);
++	  pp_printf (&pp,
++		     "out-of-bounds read from byte %s till"
++		     " byte %s but %qE ends at byte %E",
++		     start_buf, end_buf, m_diag_arg,
++		     m_byte_bound);
++	else
++	  pp_printf (&pp,
++		     "out-of-bounds read from byte %s till"
++		     " byte %s but region ends at byte %E",
++		     start_buf, end_buf, m_byte_bound);
+       }
+   }
+ 
+-  label_text describe_final_event_as_bits (const evdesc::final_event &ev)
++  void
++  describe_final_event_as_bits (pretty_printer &pp)
+   {
+     bit_size_t start = m_out_of_bounds_bits.get_start_bit_offset ();
+     bit_size_t end = m_out_of_bounds_bits.get_last_bit_offset ();
+@@ -634,23 +664,29 @@ public:
+     if (start == end)
+       {
+ 	if (m_diag_arg)
+-	  return ev.formatted_print ("out-of-bounds read at bit %s but %qE"
+-				     " ends at bit %E", start_buf, m_diag_arg,
+-							 m_bit_bound);
+-	return ev.formatted_print ("out-of-bounds read at bit %s but region"
+-				   " ends at bit %E", start_buf,
+-						       m_bit_bound);
++	  pp_printf (&pp,
++		     "out-of-bounds read at bit %s but %qE"
++		     " ends at bit %E", start_buf, m_diag_arg,
++		     m_bit_bound);
++	else
++	  pp_printf (&pp,
++		     "out-of-bounds read at bit %s but region"
++		     " ends at bit %E", start_buf,
++		     m_bit_bound);
+       }
+     else
+       {
+ 	if (m_diag_arg)
+-	  return ev.formatted_print ("out-of-bounds read from bit %s till"
+-				     " bit %s but %qE ends at bit %E",
+-				     start_buf, end_buf, m_diag_arg,
+-				     m_bit_bound);
+-	return ev.formatted_print ("out-of-bounds read from bit %s till"
+-				   " bit %s but region ends at bit %E",
+-				   start_buf, end_buf, m_bit_bound);
++	  pp_printf (&pp,
++		     "out-of-bounds read from bit %s till"
++		     " bit %s but %qE ends at bit %E",
++		     start_buf, end_buf, m_diag_arg,
++		     m_bit_bound);
++	else
++	  pp_printf (&pp,
++		     "out-of-bounds read from bit %s till"
++		     " bit %s but region ends at bit %E",
++		     start_buf, end_buf, m_bit_bound);
+       }
+   }
+ 
+@@ -695,17 +731,20 @@ public:
+     return warned;
+   }
+ 
+-  label_text describe_final_event (const evdesc::final_event &ev)
+-    final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &) final override
+   {
+     byte_range out_of_bounds_bytes (0, 0);
+     if (get_out_of_bounds_bytes (&out_of_bounds_bytes))
+-      return describe_final_event_as_bytes (ev, out_of_bounds_bytes);
+-    return describe_final_event_as_bits (ev);
++      describe_final_event_as_bytes (pp, out_of_bounds_bytes);
++    else
++      describe_final_event_as_bits (pp);
++    return true;
+   }
+ 
+-  label_text
+-  describe_final_event_as_bytes (const evdesc::final_event &ev,
++  void
++  describe_final_event_as_bytes (pretty_printer &pp,
+ 				 const byte_range &out_of_bounds_bytes)
+   {
+     byte_size_t start = out_of_bounds_bytes.get_start_byte_offset ();
+@@ -718,26 +757,32 @@ public:
+     if (start == end)
+       {
+ 	if (m_diag_arg)
+-	  return ev.formatted_print ("out-of-bounds write at byte %s but %qE"
+-				     " starts at byte 0",
+-				     start_buf, m_diag_arg);
+-	return ev.formatted_print ("out-of-bounds write at byte %s but region"
+-				   " starts at byte 0", start_buf);
++	  pp_printf (&pp,
++		     "out-of-bounds write at byte %s but %qE"
++		     " starts at byte 0",
++		     start_buf, m_diag_arg);
++	else
++	  pp_printf (&pp,
++		     "out-of-bounds write at byte %s but region"
++		     " starts at byte 0", start_buf);
+       }
+     else
+       {
+ 	if (m_diag_arg)
+-	  return ev.formatted_print ("out-of-bounds write from byte %s till"
+-				     " byte %s but %qE starts at byte 0",
+-				     start_buf, end_buf, m_diag_arg);
+-	return ev.formatted_print ("out-of-bounds write from byte %s till"
+-				   " byte %s but region starts at byte 0",
+-				   start_buf, end_buf);;
++	  pp_printf (&pp,
++		     "out-of-bounds write from byte %s till"
++		     " byte %s but %qE starts at byte 0",
++		     start_buf, end_buf, m_diag_arg);
++	else
++	  pp_printf (&pp,
++		     "out-of-bounds write from byte %s till"
++		     " byte %s but region starts at byte 0",
++		     start_buf, end_buf);;
+       }
+   }
+ 
+-  label_text
+-  describe_final_event_as_bits (const evdesc::final_event &ev)
++  void
++  describe_final_event_as_bits (pretty_printer &pp)
+   {
+     bit_size_t start = m_out_of_bounds_bits.get_start_bit_offset ();
+     bit_size_t end = m_out_of_bounds_bits.get_last_bit_offset ();
+@@ -749,21 +794,27 @@ public:
+     if (start == end)
+       {
+ 	if (m_diag_arg)
+-	  return ev.formatted_print ("out-of-bounds write at bit %s but %qE"
+-				     " starts at bit 0",
+-				     start_buf, m_diag_arg);
+-	return ev.formatted_print ("out-of-bounds write at bit %s but region"
+-				   " starts at bit 0", start_buf);
++	  pp_printf (&pp,
++		     "out-of-bounds write at bit %s but %qE"
++		     " starts at bit 0",
++		     start_buf, m_diag_arg);
++	else
++	  pp_printf (&pp,
++		     "out-of-bounds write at bit %s but region"
++		     " starts at bit 0", start_buf);
+       }
+     else
+       {
+ 	if (m_diag_arg)
+-	  return ev.formatted_print ("out-of-bounds write from bit %s till"
+-				     " bit %s but %qE starts at bit 0",
+-				     start_buf, end_buf, m_diag_arg);
+-	return ev.formatted_print ("out-of-bounds write from bit %s till"
+-				   " bit %s but region starts at bit 0",
+-				   start_buf, end_buf);;
++	  pp_printf (&pp,
++		     "out-of-bounds write from bit %s till"
++		     " bit %s but %qE starts at bit 0",
++		     start_buf, end_buf, m_diag_arg);
++	else
++	  pp_printf (&pp,
++		     "out-of-bounds write from bit %s till"
++		     " bit %s but region starts at bit 0",
++		     start_buf, end_buf);;
+       }
+   }
+ 
+@@ -807,17 +858,20 @@ public:
+     return warned;
+   }
+ 
+-  label_text describe_final_event (const evdesc::final_event &ev)
+-    final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &) final override
+   {
+     byte_range out_of_bounds_bytes (0, 0);
+     if (get_out_of_bounds_bytes (&out_of_bounds_bytes))
+-      return describe_final_event_as_bytes (ev, out_of_bounds_bytes);
+-    return describe_final_event_as_bits (ev);
++      describe_final_event_as_bytes (pp, out_of_bounds_bytes);
++    else
++      describe_final_event_as_bits (pp);
++    return true;
+   }
+ 
+-  label_text
+-  describe_final_event_as_bytes (const evdesc::final_event &ev,
++  void
++  describe_final_event_as_bytes (pretty_printer &pp,
+ 				 const byte_range &out_of_bounds_bytes)
+   {
+     byte_size_t start = out_of_bounds_bytes.get_start_byte_offset ();
+@@ -830,25 +884,33 @@ public:
+     if (start == end)
+       {
+ 	if (m_diag_arg)
+-	  return ev.formatted_print ("out-of-bounds read at byte %s but %qE"
+-				     " starts at byte 0", start_buf,
+-							  m_diag_arg);
+-	return ev.formatted_print ("out-of-bounds read at byte %s but region"
+-				  " starts at byte 0", start_buf);
++	  pp_printf (&pp,
++		     "out-of-bounds read at byte %s but %qE"
++		     " starts at byte 0",
++		     start_buf, m_diag_arg);
++	else
++	  pp_printf (&pp,
++		     "out-of-bounds read at byte %s but region"
++		     " starts at byte 0",
++		     start_buf);
+       }
+     else
+       {
+ 	if (m_diag_arg)
+-	  return ev.formatted_print ("out-of-bounds read from byte %s till"
+-				     " byte %s but %qE starts at byte 0",
+-				     start_buf, end_buf, m_diag_arg);
+-	return ev.formatted_print ("out-of-bounds read from byte %s till"
+-				   " byte %s but region starts at byte 0",
+-				   start_buf, end_buf);;
++	  pp_printf (&pp,
++		     "out-of-bounds read from byte %s till"
++		     " byte %s but %qE starts at byte 0",
++		     start_buf, end_buf, m_diag_arg);
++	else
++	  pp_printf (&pp,
++		     "out-of-bounds read from byte %s till"
++		     " byte %s but region starts at byte 0",
++		     start_buf, end_buf);;
+       }
+   }
+ 
+-  label_text describe_final_event_as_bits (const evdesc::final_event &ev)
++  void
++  describe_final_event_as_bits (pretty_printer &pp)
+   {
+     bit_size_t start = m_out_of_bounds_bits.get_start_bit_offset ();
+     bit_size_t end = m_out_of_bounds_bits.get_last_bit_offset ();
+@@ -860,21 +922,27 @@ public:
+     if (start == end)
+       {
+ 	if (m_diag_arg)
+-	  return ev.formatted_print ("out-of-bounds read at bit %s but %qE"
+-				     " starts at bit 0", start_buf,
+-							  m_diag_arg);
+-	return ev.formatted_print ("out-of-bounds read at bit %s but region"
+-				  " starts at bit 0", start_buf);
++	  pp_printf (&pp,
++		     "out-of-bounds read at bit %s but %qE"
++		     " starts at bit 0",
++		     start_buf, m_diag_arg);
++	else
++	  pp_printf (&pp,
++		     "out-of-bounds read at bit %s but region"
++		     " starts at bit 0", start_buf);
+       }
+     else
+       {
+ 	if (m_diag_arg)
+-	  return ev.formatted_print ("out-of-bounds read from bit %s till"
+-				     " bit %s but %qE starts at bit 0",
+-				     start_buf, end_buf, m_diag_arg);
+-	return ev.formatted_print ("out-of-bounds read from bit %s till"
+-				   " bit %s but region starts at bit 0",
+-				   start_buf, end_buf);;
++	  pp_printf (&pp,
++		     "out-of-bounds read from bit %s till"
++		     " bit %s but %qE starts at bit 0",
++		     start_buf, end_buf, m_diag_arg);
++	else
++	  pp_printf (&pp,
++		     "out-of-bounds read from bit %s till"
++		     " bit %s but region starts at bit 0",
++		     start_buf, end_buf);;
+       }
+   }
+ 
+@@ -968,8 +1036,9 @@ public:
+     return warned;
+   }
+ 
+-  label_text
+-  describe_final_event (const evdesc::final_event &ev) final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &) final override
+   {
+     if (m_offset)
+       {
+@@ -985,56 +1054,67 @@ public:
+ 		  {
+ 		    /* Singular m_num_bytes.  */
+ 		    if (m_diag_arg)
+-		      return ev.formatted_print
+-			("write of %E byte at offset %qE exceeds %qE",
+-			 m_num_bytes, m_offset, m_diag_arg);
++		      pp_printf (&pp,
++				 "write of %E byte at offset %qE exceeds %qE",
++				 m_num_bytes, m_offset, m_diag_arg);
+ 		    else
+-		      return ev.formatted_print
+-			("write of %E byte at offset %qE exceeds the buffer",
+-			 m_num_bytes, m_offset);
++		      pp_printf (&pp,
++				 "write of %E byte at offset %qE exceeds"
++				 " the buffer",
++				 m_num_bytes, m_offset);
+ 		  }
+ 		else
+ 		  {
+ 		    /* Plural m_num_bytes.  */
+ 		    if (m_diag_arg)
+-		      return ev.formatted_print
+-			("write of %E bytes at offset %qE exceeds %qE",
+-			 m_num_bytes, m_offset, m_diag_arg);
++		      pp_printf (&pp,
++				 "write of %E bytes at offset %qE exceeds %qE",
++				 m_num_bytes, m_offset, m_diag_arg);
+ 		    else
+-		      return ev.formatted_print
+-			("write of %E bytes at offset %qE exceeds the buffer",
+-			 m_num_bytes, m_offset);
++		      pp_printf (&pp,
++				 "write of %E bytes at offset %qE exceeds"
++				 " the buffer",
++				 m_num_bytes, m_offset);
+ 		  }
+ 	      }
+ 	    else
+ 	      {
+ 		/* Known offset, known symbolic size.  */
+ 		if (m_diag_arg)
+-		  return ev.formatted_print
+-		    ("write of %qE bytes at offset %qE exceeds %qE",
+-		     m_num_bytes, m_offset, m_diag_arg);
++		  pp_printf (&pp,
++			     "write of %qE bytes at offset %qE exceeds %qE",
++			     m_num_bytes, m_offset, m_diag_arg);
+ 		else
+-		  return ev.formatted_print
+-		    ("write of %qE bytes at offset %qE exceeds the buffer",
+-		     m_num_bytes, m_offset);
++		  pp_printf (&pp,
++			     "write of %qE bytes at offset %qE exceeds"
++			     " the buffer",
++			     m_num_bytes, m_offset);
+ 	      }
+ 	  }
+ 	else
+ 	  {
+ 	    /* Known offset, unknown size.  */
+ 	    if (m_diag_arg)
+-	      return ev.formatted_print ("write at offset %qE exceeds %qE",
+-					 m_offset, m_diag_arg);
++	      pp_printf (&pp,
++			 "write at offset %qE exceeds %qE",
++			 m_offset, m_diag_arg);
+ 	    else
+-	      return ev.formatted_print ("write at offset %qE exceeds the"
+-					 " buffer", m_offset);
++	      pp_printf (&pp,
++			 "write at offset %qE exceeds the buffer",
++			 m_offset);
+ 	  }
+       }
+-    /* Unknown offset.  */
+-    if (m_diag_arg)
+-      return ev.formatted_print ("out-of-bounds write on %qE",
+-				 m_diag_arg);
+-    return ev.formatted_print ("out-of-bounds write");
++    else
++      {
++	/* Unknown offset.  */
++	if (m_diag_arg)
++	  pp_printf (&pp,
++		     "out-of-bounds write on %qE",
++		     m_diag_arg);
++	else
++	  pp_printf (&pp, "out-of-bounds write");
++      }
++    return true;
+   }
+ 
+   enum access_direction get_dir () const final override { return DIR_WRITE; }
+@@ -1082,8 +1162,9 @@ public:
+     return warned;
+   }
+ 
+-  label_text
+-  describe_final_event (const evdesc::final_event &ev) final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &) final override
+   {
+     if (m_offset)
+       {
+@@ -1099,56 +1180,68 @@ public:
+ 		  {
+ 		    /* Singular m_num_bytes.  */
+ 		    if (m_diag_arg)
+-		      return ev.formatted_print
+-			("read of %E byte at offset %qE exceeds %qE",
+-			 m_num_bytes, m_offset, m_diag_arg);
++		      pp_printf (&pp,
++				 "read of %E byte at offset %qE exceeds %qE",
++				 m_num_bytes, m_offset, m_diag_arg);
+ 		    else
+-		      return ev.formatted_print
+-			("read of %E byte at offset %qE exceeds the buffer",
+-			 m_num_bytes, m_offset);
++		      pp_printf (&pp,
++				 "read of %E byte at offset %qE exceeds"
++				 " the buffer",
++				 m_num_bytes, m_offset);
+ 		  }
+ 		else
+ 		  {
+ 		    /* Plural m_num_bytes.  */
+ 		    if (m_diag_arg)
+-		      return ev.formatted_print
+-			("read of %E bytes at offset %qE exceeds %qE",
+-			 m_num_bytes, m_offset, m_diag_arg);
++		      pp_printf (&pp,
++				 "read of %E bytes at offset %qE exceeds %qE",
++				 m_num_bytes, m_offset, m_diag_arg);
+ 		    else
+-		      return ev.formatted_print
+-			("read of %E bytes at offset %qE exceeds the buffer",
+-			 m_num_bytes, m_offset);
++		      pp_printf (&pp,
++				 "read of %E bytes at offset %qE exceeds"
++				 " the buffer",
++				 m_num_bytes, m_offset);
+ 		  }
+ 	      }
+ 	    else
+ 	      {
+ 		/* Known offset, known symbolic size.  */
+ 		if (m_diag_arg)
+-		  return ev.formatted_print
+-		    ("read of %qE bytes at offset %qE exceeds %qE",
+-		     m_num_bytes, m_offset, m_diag_arg);
++		  pp_printf (&pp,
++			     "read of %qE bytes at offset %qE exceeds %qE",
++			     m_num_bytes, m_offset, m_diag_arg);
+ 		else
+-		  return ev.formatted_print
+-		    ("read of %qE bytes at offset %qE exceeds the buffer",
+-		     m_num_bytes, m_offset);
++		  pp_printf (&pp,
++			     "read of %qE bytes at offset %qE exceeds"
++			     " the buffer",
++			     m_num_bytes, m_offset);
+ 	      }
+ 	  }
+ 	else
+ 	  {
+ 	    /* Known offset, unknown size.  */
+ 	    if (m_diag_arg)
+-	      return ev.formatted_print ("read at offset %qE exceeds %qE",
+-					 m_offset, m_diag_arg);
++	      pp_printf (&pp,
++			 "read at offset %qE exceeds %qE",
++			 m_offset, m_diag_arg);
+ 	    else
+-	      return ev.formatted_print ("read at offset %qE exceeds the"
+-					 " buffer", m_offset);
++	      pp_printf (&pp,
++			 "read at offset %qE exceeds the buffer",
++			 m_offset);
+ 	  }
+       }
+-    /* Unknown offset.  */
+-    if (m_diag_arg)
+-      return ev.formatted_print ("out-of-bounds read on %qE",
+-				 m_diag_arg);
+-    return ev.formatted_print ("out-of-bounds read");
++    else
++      {
++	/* Unknown offset.  */
++	if (m_diag_arg)
++	  pp_printf (&pp,
++		     "out-of-bounds read on %qE",
++		     m_diag_arg);
++	else
++	  pp_printf (&pp,
++		     "out-of-bounds read");
++      }
++    return true;
+   }
+ 
+   enum access_direction get_dir () const final override { return DIR_READ; }
+diff --git a/gcc/analyzer/call-details.cc b/gcc/analyzer/call-details.cc
+index a9c613bc1822..00c939399b20 100644
+--- a/gcc/analyzer/call-details.cc
++++ b/gcc/analyzer/call-details.cc
+@@ -466,11 +466,14 @@ public:
+     return warned;
+   }
+ 
+-  label_text describe_final_event (const evdesc::final_event &ev) final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &) final override
+   {
+-    return ev.formatted_print
+-      ("overlapping buffers passed as arguments to %qD",
+-       m_fndecl);
++    pp_printf (&pp,
++	       "overlapping buffers passed as arguments to %qD",
++	       m_fndecl);
++    return true;
+   }
+ 
+   void maybe_add_sarif_properties (sarif_object &result_obj)
+diff --git a/gcc/analyzer/call-info.cc b/gcc/analyzer/call-info.cc
+index 828ece5c7f03..5b4cb6c60b34 100644
+--- a/gcc/analyzer/call-info.cc
++++ b/gcc/analyzer/call-info.cc
+@@ -75,14 +75,14 @@ custom_edge_info::update_state (program_state *state,
+ 
+ /* class call_info : public custom_edge_info.  */
+ 
+-/* Implementation of custom_edge_info::print vfunc for call_info:
+-   use get_desc to get a label_text, and print it to PP.  */
++/* Implementation of custom_edge_info::print vfunc for call_info.  */
++
++// FIXME: do we even need this?
+ 
+ void
+ call_info::print (pretty_printer *pp) const
+ {
+-  label_text desc (get_desc (pp_show_color (pp)));
+-  pp_string (pp, desc.get ());
++  print_desc (*pp);
+ }
+ 
+ /* Implementation of custom_edge_info::add_events_to_path vfunc for
+@@ -102,9 +102,9 @@ call_info::add_events_to_path (checker_path *emission_path,
+       m_call_info (call_info)
+     {}
+ 
+-    label_text get_desc (bool can_colorize) const final override
++    void print_desc (pretty_printer &pp) const final override
+     {
+-      return m_call_info->get_desc (can_colorize);
++      m_call_info->print_desc (pp);
+     }
+ 
+   private:
+@@ -154,13 +154,13 @@ call_info::call_info (const call_details &cd,
+ 
+ /* class succeed_or_fail_call_info : public call_info.  */
+ 
+-label_text
+-succeed_or_fail_call_info::get_desc (bool can_colorize) const
++void
++succeed_or_fail_call_info::print_desc (pretty_printer &pp) const
+ {
+   if (m_success)
+-    return make_label_text (can_colorize, "when %qE succeeds", get_fndecl ());
++    pp_printf (&pp, "when %qE succeeds", get_fndecl ());
+   else
+-    return make_label_text (can_colorize, "when %qE fails", get_fndecl ());
++    pp_printf (&pp, "when %qE fails", get_fndecl ());
+ }
+ 
+ } // namespace ana
+diff --git a/gcc/analyzer/call-info.h b/gcc/analyzer/call-info.h
+index 17d5fdfec735..de61fdcb8d23 100644
+--- a/gcc/analyzer/call-info.h
++++ b/gcc/analyzer/call-info.h
+@@ -24,7 +24,7 @@ along with GCC; see the file COPYING3.  If not see
+ namespace ana {
+ 
+ /* Subclass of custom_edge_info for an outcome of a call.
+-   This is still abstract; the update_model and get_desc vfuncs must be
++   This is still abstract; the update_model and print_desc vfuncs must be
+    implemented.  */
+ 
+ class call_info : public custom_edge_info
+@@ -37,7 +37,7 @@ public:
+   const gcall *get_call_stmt () const { return m_call_stmt; }
+   tree get_fndecl () const { return m_fndecl; }
+ 
+-  virtual label_text get_desc (bool can_colorize) const = 0;
++  virtual void print_desc (pretty_printer &pp) const = 0;
+ 
+   call_details get_call_details (region_model *model,
+ 				 region_model_context *ctxt) const;
+@@ -62,7 +62,7 @@ private:
+ class succeed_or_fail_call_info : public call_info
+ {
+ public:
+-  label_text get_desc (bool can_colorize) const final override;
++  void print_desc (pretty_printer &pp) const final override;
+ 
+ protected:
+   succeed_or_fail_call_info (const call_details &cd, bool success)
+diff --git a/gcc/analyzer/checker-event.cc b/gcc/analyzer/checker-event.cc
+index 5a91d7b51ea9..5a292377e937 100644
+--- a/gcc/analyzer/checker-event.cc
++++ b/gcc/analyzer/checker-event.cc
+@@ -175,9 +175,9 @@ maybe_add_sarif_properties (sarif_object &thread_flow_loc_obj) const
+ void
+ checker_event::dump (pretty_printer *pp) const
+ {
+-  label_text event_desc (get_desc (false));
+-  pp_printf (pp, "\"%s\" (depth %i",
+-	     event_desc.get (), m_effective_depth);
++  pp_character (pp, '"');
++  print_desc (*pp);
++  pp_printf (pp, "\" (depth %i", m_effective_depth);
+ 
+   if (m_effective_depth != m_original_depth)
+     pp_printf (pp, " corrected from %i",
+@@ -208,11 +208,11 @@ checker_event::debug () const
+    Base implementation of checker_event::prepare_for_emission vfunc;
+    subclasses that override this should chain up to it.
+ 
+-   Record PD and EMISSION_ID, and call the get_desc vfunc, so that any
+-   side-effects of the call to get_desc take place before
++   Record PD and EMISSION_ID, and call the print_desc vfunc, so that any
++   side-effects of the call to print_desc take place before
+    pending_diagnostic::emit is called.
+ 
+-   For example, state_change_event::get_desc can call
++   For example, state_change_event::print_desc can call
+    pending_diagnostic::describe_state_change; free_of_non_heap can use this
+    to tweak the message (TODO: would be neater to simply capture the
+    pertinent data within the sm-state).  */
+@@ -225,31 +225,32 @@ checker_event::prepare_for_emission (checker_path *,
+   m_pending_diagnostic = pd;
+   m_emission_id = emission_id;
+ 
+-  label_text desc = get_desc (false);
++  auto pp = global_dc->clone_printer ();
++  print_desc (*pp.get ());
+ }
+ 
+ /* class debug_event : public checker_event.  */
+ 
+-/* Implementation of diagnostic_event::get_desc vfunc for
++/* Implementation of diagnostic_event::print_desc vfunc for
+    debug_event.
+    Use the saved string as the event's description.  */
+ 
+-label_text
+-debug_event::get_desc (bool) const
++void
++debug_event::print_desc (pretty_printer &pp) const
+ {
+-  return label_text::borrow (m_desc);
++  pp_string (&pp, m_desc);
+ }
+ 
+ /* class precanned_custom_event : public custom_event.  */
+ 
+-/* Implementation of diagnostic_event::get_desc vfunc for
++/* Implementation of diagnostic_event::print_desc vfunc for
+    precanned_custom_event.
+    Use the saved string as the event's description.  */
+ 
+-label_text
+-precanned_custom_event::get_desc (bool) const
++void
++precanned_custom_event::print_desc (pretty_printer &pp) const
+ {
+-  return label_text::borrow (m_desc);
++  pp_string (&pp, m_desc);
+ }
+ 
+ /* class statement_event : public checker_event.  */
+@@ -265,17 +266,15 @@ statement_event::statement_event (const gimple *stmt, tree fndecl, int depth,
+ {
+ }
+ 
+-/* Implementation of diagnostic_event::get_desc vfunc for
++/* Implementation of diagnostic_event::print_desc vfunc for
+    statement_event.
+    Use the statement's dump form as the event's description.  */
+ 
+-label_text
+-statement_event::get_desc (bool) const
++void
++statement_event::print_desc (pretty_printer &pp) const
+ {
+-  pretty_printer pp;
+   pp_string (&pp, "stmt: ");
+   pp_gimple_stmt_1 (&pp, m_stmt, 0, (dump_flags_t)0);
+-  return label_text::take (xstrdup (pp_formatted_text (&pp)));
+ }
+ 
+ /* class region_creation_event : public checker_event.  */
+@@ -285,70 +284,69 @@ region_creation_event::region_creation_event (const event_loc_info &loc_info)
+ {
+ }
+ 
+-/* The various region_creation_event subclasses' get_desc
++/* The various region_creation_event subclasses' print_desc
+    implementations.  */
+ 
+-label_text
+-region_creation_event_memory_space::get_desc (bool) const
++void
++region_creation_event_memory_space::print_desc (pretty_printer &pp) const
+ {
+   switch (m_mem_space)
+     {
+     default:
+-      return label_text::borrow ("region created here");
++      pp_string (&pp, "region created here");
++      return;
+     case MEMSPACE_STACK:
+-      return label_text::borrow ("region created on stack here");
++      pp_string (&pp, "region created on stack here");
++      return;
+     case MEMSPACE_HEAP:
+-      return label_text::borrow ("region created on heap here");
++      pp_string (&pp, "region created on heap here");
++      return;
+     }
+ }
+ 
+-label_text
+-region_creation_event_capacity::get_desc (bool can_colorize) const
++void
++region_creation_event_capacity::print_desc (pretty_printer &pp) const
+ {
+   gcc_assert (m_capacity);
+   if (TREE_CODE (m_capacity) == INTEGER_CST)
+     {
+       unsigned HOST_WIDE_INT hwi = tree_to_uhwi (m_capacity);
+-      return make_label_text_n (can_colorize,
+-				hwi,
+-				"capacity: %wu byte",
+-				"capacity: %wu bytes",
+-				hwi);
++      return pp_printf_n (&pp,
++			  hwi,
++			  "capacity: %wu byte",
++			  "capacity: %wu bytes",
++			  hwi);
+     }
+   else
+-    return make_label_text (can_colorize,
+-			    "capacity: %qE bytes", m_capacity);
++    return pp_printf (&pp, "capacity: %qE bytes", m_capacity);
+ }
+ 
+-label_text
+-region_creation_event_allocation_size::get_desc (bool can_colorize) const
++void
++region_creation_event_allocation_size::print_desc (pretty_printer &pp) const
+ {
+   if (m_capacity)
+     {
+       if (TREE_CODE (m_capacity) == INTEGER_CST)
+-	return make_label_text_n (can_colorize,
+-				  tree_to_uhwi (m_capacity),
+-				  "allocated %E byte here",
+-				  "allocated %E bytes here",
+-				  m_capacity);
++	pp_printf_n (&pp,
++		     tree_to_uhwi (m_capacity),
++		     "allocated %E byte here",
++		     "allocated %E bytes here",
++		     m_capacity);
+       else
+-	return make_label_text (can_colorize,
+-				"allocated %qE bytes here",
+-				m_capacity);
++	pp_printf (&pp,
++		   "allocated %qE bytes here",
++		   m_capacity);
+     }
+-  return make_label_text (can_colorize, "allocated here");
++  pp_printf (&pp, "allocated here");
+ }
+ 
+-label_text
+-region_creation_event_debug::get_desc (bool) const
++void
++region_creation_event_debug::print_desc (pretty_printer &pp) const
+ {
+-  pretty_printer pp;
+-  pp_format_decoder (&pp) = default_tree_printer;
+   pp_string (&pp, "region creation: ");
+   m_reg->dump_to_pp (&pp, true);
+   if (m_capacity)
+     pp_printf (&pp, " capacity: %qE", m_capacity);
+-  return label_text::take (xstrdup (pp_formatted_text (&pp)));
+ }
+ 
+ /* class function_entry_event : public checker_event.  */
+@@ -362,15 +360,15 @@ function_entry_event::function_entry_event (const program_point &dst_point)
+ {
+ }
+ 
+-/* Implementation of diagnostic_event::get_desc vfunc for
++/* Implementation of diagnostic_event::print_desc vfunc for
+    function_entry_event.
+ 
+    Use a string such as "entry to 'foo'" as the event's description.  */
+ 
+-label_text
+-function_entry_event::get_desc (bool can_colorize) const
++void
++function_entry_event::print_desc (pretty_printer &pp) const
+ {
+-  return make_label_text (can_colorize, "entry to %qE", m_effective_fndecl);
++  pp_printf (&pp, "entry to %qE", m_effective_fndecl);
+ }
+ 
+ /* Implementation of diagnostic_event::get_meaning vfunc for
+@@ -408,7 +406,7 @@ state_change_event::state_change_event (const supernode *node,
+ {
+ }
+ 
+-/* Implementation of diagnostic_event::get_desc vfunc for
++/* Implementation of diagnostic_event::print_desc vfunc for
+    state_change_event.
+ 
+    Attempt to generate a nicer human-readable description.
+@@ -419,73 +417,43 @@ state_change_event::state_change_event (const supernode *node,
+    the diagnostic is about to being emitted, so the description for
+    an event can change.  */
+ 
+-label_text
+-state_change_event::get_desc (bool can_colorize) const
++void
++state_change_event::print_desc (pretty_printer &pp) const
+ {
+   if (m_pending_diagnostic)
+     {
+       region_model *model = m_dst_state.m_region_model;
+       tree var = model->get_representative_tree (m_sval);
+       tree origin = model->get_representative_tree (m_origin);
+-      label_text custom_desc
+-	= m_pending_diagnostic->describe_state_change
+-	    (evdesc::state_change (can_colorize, var, origin,
+-				   m_from, m_to, m_emission_id, *this));
+-      if (custom_desc.get ())
++      evdesc::state_change evd (var, origin,
++				m_from, m_to, m_emission_id, *this);
++      if (m_pending_diagnostic->describe_state_change (pp, evd))
+ 	{
+ 	  if (flag_analyzer_verbose_state_changes)
+ 	    {
+-	      /* Get any "meaning" of event.  */
+-	      diagnostic_event::meaning meaning = get_meaning ();
+-	      pretty_printer meaning_pp;
+-	      meaning.dump_to_pp (&meaning_pp);
++	      /* Append debugging information about this event.  */
+ 
+-	      /* Append debug version.  */
+ 	      if (var)
+-		{
+-		  if (m_origin)
+-		    return make_label_text
+-		      (can_colorize,
+-		       "%s (state of %qE: %qs -> %qs, origin: %qE, meaning: %s)",
+-		       custom_desc.get (),
+-		       var,
+-		       m_from->get_name (),
+-		       m_to->get_name (),
+-		       origin,
+-		       pp_formatted_text (&meaning_pp));
+-		  else
+-		    return make_label_text
+-		      (can_colorize,
+-		       "%s (state of %qE: %qs -> %qs, NULL origin, meaning: %s)",
+-		       custom_desc.get (),
+-		       var,
+-		       m_from->get_name (),
+-		       m_to->get_name (),
+-		       pp_formatted_text (&meaning_pp));
+-		}
++		pp_printf (&pp, " (state of %qE: ", var);
++	      else
++		pp_string (&pp, " (state: ");
++
++	      pp_printf (&pp, "%qs -> %qs, ",
++			 m_from->get_name (),
++			 m_to->get_name ());
++
++	      if (m_origin)
++		pp_printf (&pp, "origin: %qE", origin);
+ 	      else
+-		{
+-		  if (m_origin)
+-		    return make_label_text
+-		      (can_colorize,
+-		       "%s (state: %qs -> %qs, origin: %qE, meaning: %s)",
+-		       custom_desc.get (),
+-		       m_from->get_name (),
+-		       m_to->get_name (),
+-		       origin,
+-		       pp_formatted_text (&meaning_pp));
+-		  else
+-		    return make_label_text
+-		      (can_colorize,
+-		       "%s (state: %qs -> %qs, NULL origin, meaning: %s)",
+-		       custom_desc.get (),
+-		       m_from->get_name (),
+-		       m_to->get_name (),
+-		       pp_formatted_text (&meaning_pp));
+-		}
++		pp_string (&pp, "NULL origin");
++
++	      /* Get any "meaning" of event.  */
++	      diagnostic_event::meaning meaning = get_meaning ();
++	      pp_string (&pp, ", meaning: ");
++	      meaning.dump_to_pp (&pp);
++	      pp_string (&pp, ")");
+ 	    }
+-	  else
+-	    return custom_desc;
++	  return;
+ 	}
+     }
+ 
+@@ -493,33 +461,27 @@ state_change_event::get_desc (bool can_colorize) const
+   if (m_sval)
+     {
+       label_text sval_desc = m_sval->get_desc ();
++      pp_printf (&pp,
++		 "state of %qs: %qs -> %qs",
++		 sval_desc.get (),
++		 m_from->get_name (),
++		 m_to->get_name ());
+       if (m_origin)
+ 	{
+ 	  label_text origin_desc = m_origin->get_desc ();
+-	  return make_label_text
+-	    (can_colorize,
+-	     "state of %qs: %qs -> %qs (origin: %qs)",
+-	     sval_desc.get (),
+-	     m_from->get_name (),
+-	     m_to->get_name (),
+-	     origin_desc.get ());
++	  pp_printf (&pp, " (origin: %qs)",
++		     origin_desc.get ());
+ 	}
+       else
+-	return make_label_text
+-	  (can_colorize,
+-	   "state of %qs: %qs -> %qs (NULL origin)",
+-	   sval_desc.get (),
+-	   m_from->get_name (),
+-	   m_to->get_name ());
++	pp_string (&pp, " (NULL origin)");
+     }
+   else
+     {
+       gcc_assert (m_origin == NULL);
+-      return make_label_text
+-	(can_colorize,
+-	 "global state: %qs -> %qs",
+-	 m_from->get_name (),
+-	 m_to->get_name ());
++      pp_printf (&pp,
++		 "global state: %qs -> %qs",
++		 m_from->get_name (),
++		 m_to->get_name ());
+     }
+ }
+ 
+@@ -535,9 +497,9 @@ state_change_event::get_meaning () const
+       region_model *model = m_dst_state.m_region_model;
+       tree var = model->get_representative_tree (m_sval);
+       tree origin = model->get_representative_tree (m_origin);
+-      return m_pending_diagnostic->get_meaning_for_state_change
+-	(evdesc::state_change (false, var, origin,
+-			       m_from, m_to, m_emission_id, *this));
++      evdesc::state_change evd (var, origin,
++				m_from, m_to, m_emission_id, *this);
++      return m_pending_diagnostic->get_meaning_for_state_change (evd);
+     }
+   else
+     return meaning ();
+@@ -587,9 +549,9 @@ superedge_event::should_filter_p (int verbosity) const
+ 	  {
+ 	    /* Filter events with empty descriptions.  This ought to filter
+ 	       FALLTHRU, but retain true/false/switch edges.  */
+-	    label_text desc = get_desc (false);
+-	    gcc_assert (desc.get ());
+-	    if (desc.get ()[0] == '\0')
++	    auto pp = global_dc->clone_printer ();
++	    print_desc (*pp.get ());
++	    if (pp_formatted_text (pp.get ()) [0] == '\0')
+ 	      return true;
+ 	  }
+       }
+@@ -651,7 +613,7 @@ cfg_edge_event::get_meaning () const
+ 
+ /* class start_cfg_edge_event : public cfg_edge_event.  */
+ 
+-/* Implementation of diagnostic_event::get_desc vfunc for
++/* Implementation of diagnostic_event::print_desc vfunc for
+    start_cfg_edge_event.
+ 
+    If -fanalyzer-verbose-edges, then generate low-level descriptions, such
+@@ -668,11 +630,11 @@ cfg_edge_event::get_meaning () const
+    holds, such as:
+      "following 'false' branch (when 'ptr' is non-NULL)..."
+ 
+-   Failing that, return an empty description (which will lead to this event
++   Failing that, print nothing (which will lead to this event
+    being filtered).  */
+ 
+-label_text
+-start_cfg_edge_event::get_desc (bool can_colorize) const
++void
++start_cfg_edge_event::print_desc (pretty_printer &pp) const
+ {
+   bool user_facing = !flag_analyzer_verbose_edges;
+   label_text edge_desc (m_sedge->get_description (user_facing));
+@@ -680,33 +642,31 @@ start_cfg_edge_event::get_desc (bool can_colorize) const
+     {
+       if (edge_desc.get () && strlen (edge_desc.get ()) > 0)
+ 	{
+-	  label_text cond_desc = maybe_describe_condition (can_colorize);
++	  label_text cond_desc = maybe_describe_condition (pp_show_color (&pp));
+ 	  label_text result;
+ 	  if (cond_desc.get ())
+-	    return make_label_text (can_colorize,
+-				    "following %qs branch (%s)...",
+-				    edge_desc.get (), cond_desc.get ());
++	    pp_printf (&pp,
++		       "following %qs branch (%s)...",
++		       edge_desc.get (), cond_desc.get ());
+ 	  else
+-	    return make_label_text (can_colorize,
+-				    "following %qs branch...",
+-				    edge_desc.get ());
++	    pp_printf (&pp,
++		       "following %qs branch...",
++		       edge_desc.get ());
+ 	}
+-      else
+-	return label_text::borrow ("");
+     }
+   else
+     {
+       if (strlen (edge_desc.get ()) > 0)
+-	return make_label_text (can_colorize,
+-				"taking %qs edge SN:%i -> SN:%i",
+-				edge_desc.get (),
+-				m_sedge->m_src->m_index,
+-				m_sedge->m_dest->m_index);
++	return pp_printf (&pp,
++			  "taking %qs edge SN:%i -> SN:%i",
++			  edge_desc.get (),
++			  m_sedge->m_src->m_index,
++			  m_sedge->m_dest->m_index);
+       else
+-	return make_label_text (can_colorize,
+-				"taking edge SN:%i -> SN:%i",
+-				m_sedge->m_src->m_index,
+-				m_sedge->m_dest->m_index);
++	return pp_printf (&pp,
++			  "taking edge SN:%i -> SN:%i",
++			  m_sedge->m_src->m_index,
++			  m_sedge->m_dest->m_index);
+     }
+ }
+ 
+@@ -854,7 +814,7 @@ call_event::call_event (const exploded_edge &eedge,
+    m_dest_snode = eedge.m_dest->get_supernode ();
+ }
+ 
+-/* Implementation of diagnostic_event::get_desc vfunc for
++/* Implementation of diagnostic_event::print_desc vfunc for
+    call_event.
+ 
+    If this call event passes critical state for an sm-based warning,
+@@ -865,28 +825,25 @@ call_event::call_event (const exploded_edge &eedge,
+    Otherwise, generate a description of the form
+    "calling 'foo' from 'bar'".  */
+ 
+-label_text
+-call_event::get_desc (bool can_colorize) const
++void
++call_event::print_desc (pretty_printer &pp) const
+ {
+   if (m_critical_state && m_pending_diagnostic)
+     {
+       gcc_assert (m_var);
+       tree var = fixup_tree_for_diagnostic (m_var);
+-      label_text custom_desc
+-	= m_pending_diagnostic->describe_call_with_state
+-	    (evdesc::call_with_state (can_colorize,
+-				      m_src_snode->m_fun->decl,
+-				      m_dest_snode->m_fun->decl,
+-				      var,
+-				      m_critical_state));
+-      if (custom_desc.get ())
+-	return custom_desc;
++      evdesc::call_with_state evd (m_src_snode->m_fun->decl,
++				   m_dest_snode->m_fun->decl,
++				   var,
++				   m_critical_state);
++      if (m_pending_diagnostic->describe_call_with_state (pp, evd))
++	return;
+     }
+ 
+-  return make_label_text (can_colorize,
+-			  "calling %qE from %qE",
+-			  get_callee_fndecl (),
+-			  get_caller_fndecl ());
++  pp_printf (&pp,
++	     "calling %qE from %qE",
++	     get_callee_fndecl (),
++	     get_caller_fndecl ());
+ }
+ 
+ /* Implementation of diagnostic_event::get_meaning vfunc for
+@@ -933,7 +890,7 @@ return_event::return_event (const exploded_edge &eedge,
+   m_dest_snode = eedge.m_dest->get_supernode ();
+ }
+ 
+-/* Implementation of diagnostic_event::get_desc vfunc for
++/* Implementation of diagnostic_event::print_desc vfunc for
+    return_event.
+ 
+    If this return event returns critical state for an sm-based warning,
+@@ -944,8 +901,8 @@ return_event::return_event (const exploded_edge &eedge,
+    Otherwise, generate a description of the form
+    "returning to 'foo' from 'bar'.  */
+ 
+-label_text
+-return_event::get_desc (bool can_colorize) const
++void
++return_event::print_desc (pretty_printer &pp) const
+ {
+   /*  For greatest precision-of-wording, if this is returning the
+       state involved in the pending diagnostic, give the pending
+@@ -953,19 +910,16 @@ return_event::get_desc (bool can_colorize) const
+       itself).  */
+   if (m_critical_state && m_pending_diagnostic)
+     {
+-      label_text custom_desc
+-	= m_pending_diagnostic->describe_return_of_state
+-	    (evdesc::return_of_state (can_colorize,
+-				      m_dest_snode->m_fun->decl,
+-				      m_src_snode->m_fun->decl,
+-				      m_critical_state));
+-      if (custom_desc.get ())
+-	return custom_desc;
++      evdesc::return_of_state evd (m_dest_snode->m_fun->decl,
++				   m_src_snode->m_fun->decl,
++				   m_critical_state);
++      if (m_pending_diagnostic->describe_return_of_state (pp, evd))
++	return;
+     }
+-  return make_label_text (can_colorize,
+-			  "returning to %qE from %qE",
+-			  m_dest_snode->m_fun->decl,
+-			  m_src_snode->m_fun->decl);
++  pp_printf (&pp,
++	     "returning to %qE from %qE",
++	     m_dest_snode->m_fun->decl,
++	     m_src_snode->m_fun->decl);
+ }
+ 
+ /* Implementation of diagnostic_event::get_meaning vfunc for
+@@ -987,12 +941,12 @@ return_event::is_return_p () const
+ 
+ /* class start_consolidated_cfg_edges_event : public checker_event.  */
+ 
+-label_text
+-start_consolidated_cfg_edges_event::get_desc (bool can_colorize) const
++void
++start_consolidated_cfg_edges_event::print_desc (pretty_printer &pp) const
+ {
+-  return make_label_text (can_colorize,
+-			  "following %qs branch...",
+-			  m_edge_sense ? "true" : "false");
++  pp_printf (&pp,
++	     "following %qs branch...",
++	     m_edge_sense ? "true" : "false");
+ }
+ 
+ /* Implementation of diagnostic_event::get_meaning vfunc for
+@@ -1007,13 +961,13 @@ start_consolidated_cfg_edges_event::get_meaning () const
+ 
+ /* class inlined_call_event : public checker_event.  */
+ 
+-label_text
+-inlined_call_event::get_desc (bool can_colorize) const
++void
++inlined_call_event::print_desc (pretty_printer &pp) const
+ {
+-  return make_label_text (can_colorize,
+-			  "inlined call to %qE from %qE",
+-			  m_apparent_callee_fndecl,
+-			  m_apparent_caller_fndecl);
++  pp_printf (&pp,
++	     "inlined call to %qE from %qE",
++	     m_apparent_callee_fndecl,
++	     m_apparent_caller_fndecl);
+ }
+ 
+ /* Implementation of diagnostic_event::get_meaning vfunc for
+@@ -1027,15 +981,15 @@ inlined_call_event::get_meaning () const
+ 
+ /* class setjmp_event : public checker_event.  */
+ 
+-/* Implementation of diagnostic_event::get_desc vfunc for
++/* Implementation of diagnostic_event::print_desc vfunc for
+    setjmp_event.  */
+ 
+-label_text
+-setjmp_event::get_desc (bool can_colorize) const
++void
++setjmp_event::print_desc (pretty_printer &pp) const
+ {
+-  return make_label_text (can_colorize,
+-			  "%qs called here",
+-			  get_user_facing_name (m_setjmp_call));
++  pp_printf (&pp,
++	     "%qs called here",
++	     get_user_facing_name (m_setjmp_call));
+ }
+ 
+ /* Implementation of checker_event::prepare_for_emission vfunc for setjmp_event.
+@@ -1085,35 +1039,35 @@ rewind_event::rewind_event (const exploded_edge *eedge,
+ 
+ /* class rewind_from_longjmp_event : public rewind_event.  */
+ 
+-/* Implementation of diagnostic_event::get_desc vfunc for
++/* Implementation of diagnostic_event::print_desc vfunc for
+    rewind_from_longjmp_event.  */
+ 
+-label_text
+-rewind_from_longjmp_event::get_desc (bool can_colorize) const
++void
++rewind_from_longjmp_event::print_desc (pretty_printer &pp) const
+ {
+   const char *src_name
+     = get_user_facing_name (m_rewind_info->get_longjmp_call ());
+ 
+   if (get_longjmp_caller () == get_setjmp_caller ())
+     /* Special-case: purely intraprocedural rewind.  */
+-    return make_label_text (can_colorize,
+-			    "rewinding within %qE from %qs...",
+-			    get_longjmp_caller (),
+-			    src_name);
++    pp_printf (&pp,
++	       "rewinding within %qE from %qs...",
++	       get_longjmp_caller (),
++	       src_name);
+   else
+-    return make_label_text (can_colorize,
+-			    "rewinding from %qs in %qE...",
+-			    src_name,
+-			    get_longjmp_caller ());
++    pp_printf (&pp,
++	       "rewinding from %qs in %qE...",
++	       src_name,
++	       get_longjmp_caller ());
+ }
+ 
+ /* class rewind_to_setjmp_event : public rewind_event.  */
+ 
+-/* Implementation of diagnostic_event::get_desc vfunc for
++/* Implementation of diagnostic_event::print_desc vfunc for
+    rewind_to_setjmp_event.  */
+ 
+-label_text
+-rewind_to_setjmp_event::get_desc (bool can_colorize) const
++void
++rewind_to_setjmp_event::print_desc (pretty_printer &pp) const
+ {
+   const char *dst_name
+     = get_user_facing_name (m_rewind_info->get_setjmp_call ());
+@@ -1123,30 +1077,29 @@ rewind_to_setjmp_event::get_desc (bool can_colorize) const
+     {
+       if (get_longjmp_caller () == get_setjmp_caller ())
+ 	/* Special-case: purely intraprocedural rewind.  */
+-	return make_label_text (can_colorize,
+-				"...to %qs (saved at %@)",
+-				dst_name,
+-				&m_original_setjmp_event_id);
++	pp_printf (&pp,
++		   "...to %qs (saved at %@)",
++		   dst_name,
++		   &m_original_setjmp_event_id);
+       else
+-	return make_label_text (can_colorize,
+-				"...to %qs in %qE (saved at %@)",
+-				dst_name,
+-				get_setjmp_caller (),
+-				&m_original_setjmp_event_id);
++	pp_printf (&pp,
++		   "...to %qs in %qE (saved at %@)",
++		   dst_name,
++		   get_setjmp_caller (),
++		   &m_original_setjmp_event_id);
+     }
+   else
+     {
+       if (get_longjmp_caller () == get_setjmp_caller ())
+ 	/* Special-case: purely intraprocedural rewind.  */
+-	return make_label_text (can_colorize,
+-				"...to %qs",
+-				dst_name,
+-				get_setjmp_caller ());
++	pp_printf (&pp,
++		   "...to %qs",
++		   dst_name);
+       else
+-	return make_label_text (can_colorize,
+-				"...to %qs in %qE",
+-				dst_name,
+-				get_setjmp_caller ());
++	pp_printf (&pp,
++		   "...to %qs in %qE",
++		   dst_name,
++		   get_setjmp_caller ());
+     }
+ }
+ 
+@@ -1168,7 +1121,7 @@ rewind_to_setjmp_event::prepare_for_emission (checker_path *path,
+ 
+ /* class warning_event : public checker_event.  */
+ 
+-/* Implementation of diagnostic_event::get_desc vfunc for
++/* Implementation of diagnostic_event::print_desc vfunc for
+    warning_event.
+ 
+    If the pending diagnostic implements describe_final_event, use it,
+@@ -1177,48 +1130,40 @@ rewind_to_setjmp_event::prepare_for_emission (checker_path *path,
+ 
+    Otherwise generate a generic description.  */
+ 
+-label_text
+-warning_event::get_desc (bool can_colorize) const
++void
++warning_event::print_desc (pretty_printer &pp) const
+ {
+   if (m_pending_diagnostic)
+     {
+       tree var = fixup_tree_for_diagnostic (m_var);
+-      label_text ev_desc
+-	= m_pending_diagnostic->describe_final_event
+-	    (evdesc::final_event (can_colorize, var, m_state, *this));
+-      if (ev_desc.get ())
++      evdesc::final_event evd (var, m_state, *this);
++      if (m_pending_diagnostic->describe_final_event (pp, evd))
+ 	{
+ 	  if (m_sm && flag_analyzer_verbose_state_changes)
+ 	    {
+ 	      if (var)
+-		return make_label_text (can_colorize,
+-					"%s (%qE is in state %qs)",
+-					ev_desc.get (),
+-					var, m_state->get_name ());
++		pp_printf (&pp, " (%qE is in state %qs)",
++			   var, m_state->get_name ());
+ 	      else
+-		return make_label_text (can_colorize,
+-					"%s (in global state %qs)",
+-					ev_desc.get (),
+-					m_state->get_name ());
++		pp_printf (&pp, " (in global state %qs)",
++			   m_state->get_name ());
+ 	    }
+-	  else
+-	    return ev_desc;
++	  return;
+ 	}
+     }
+ 
+   if (m_sm)
+     {
+       if (m_var)
+-	return make_label_text (can_colorize,
+-				"here (%qE is in state %qs)",
+-				m_var, m_state->get_name ());
++	pp_printf (&pp, "here (%qE is in state %qs)",
++		   m_var, m_state->get_name ());
+       else
+-	return make_label_text (can_colorize,
+-				"here (in global state %qs)",
+-				m_state->get_name ());
++	pp_printf (&pp, "here (in global state %qs)",
++		   m_state->get_name ());
++      return;
+     }
+   else
+-    return label_text::borrow ("here");
++    pp_string (&pp, "here");
+ }
+ 
+ /* Implementation of diagnostic_event::get_meaning vfunc for
+diff --git a/gcc/analyzer/checker-event.h b/gcc/analyzer/checker-event.h
+index 4343641f441c..3206d6bd0512 100644
+--- a/gcc/analyzer/checker-event.h
++++ b/gcc/analyzer/checker-event.h
+@@ -167,7 +167,7 @@ public:
+     free (m_desc);
+   }
+ 
+-  label_text get_desc (bool) const final override;
++  void print_desc (pretty_printer &) const final override;
+ 
+ private:
+   char *m_desc;
+@@ -201,7 +201,7 @@ public:
+     free (m_desc);
+   }
+ 
+-  label_text get_desc (bool) const final override;
++  void print_desc (pretty_printer &) const final override;
+ 
+ private:
+   char *m_desc;
+@@ -216,7 +216,7 @@ public:
+   statement_event (const gimple *stmt, tree fndecl, int depth,
+ 		   const program_state &dst_state);
+ 
+-  label_text get_desc (bool) const final override;
++  void print_desc (pretty_printer &) const final override;
+ 
+   const gimple * const m_stmt;
+   const program_state m_dst_state;
+@@ -257,7 +257,7 @@ public:
+   {
+   }
+ 
+-  label_text get_desc (bool can_colorize) const final override;
++  void print_desc (pretty_printer &pp) const final override;
+ 
+ private:
+   enum memory_space m_mem_space;
+@@ -278,7 +278,7 @@ public:
+     gcc_assert (m_capacity);
+   }
+ 
+-  label_text get_desc (bool can_colorize) const final override;
++  void print_desc (pretty_printer &pp) const final override;
+ 
+ private:
+   tree m_capacity;
+@@ -297,7 +297,7 @@ public:
+     m_capacity (capacity)
+   {}
+ 
+-  label_text get_desc (bool can_colorize) const final override;
++  void print_desc (pretty_printer &pp) const final override;
+ 
+ private:
+   tree m_capacity;
+@@ -316,7 +316,7 @@ public:
+   {
+   }
+ 
+-  label_text get_desc (bool can_colorize) const final override;
++  void print_desc (pretty_printer &pp) const final override;
+ 
+ private:
+   const region *m_reg;
+@@ -335,7 +335,7 @@ public:
+ 
+   function_entry_event (const program_point &dst_point);
+ 
+-  label_text get_desc (bool can_colorize) const override;
++  void print_desc (pretty_printer &pp) const override;
+   meaning get_meaning () const override;
+ 
+   bool is_function_entry_p () const final override { return true; }
+@@ -356,7 +356,7 @@ public:
+ 		      const program_state &dst_state,
+ 		      const exploded_node *enode);
+ 
+-  label_text get_desc (bool can_colorize) const final override;
++  void print_desc (pretty_printer &pp) const final override;
+   meaning get_meaning () const override;
+ 
+   const function *get_dest_function () const
+@@ -388,7 +388,7 @@ public:
+ 
+   /* Mark this edge event as being either an interprocedural call or
+      return in which VAR is in STATE, and that this is critical to the
+-     diagnostic (so that get_desc can attempt to get a better description
++     diagnostic (so that print_desc can attempt to get a better description
+      from any pending_diagnostic).  */
+   void record_critical_state (tree var, state_machine::state_t state)
+   {
+@@ -439,7 +439,7 @@ public:
+   {
+   }
+ 
+-  label_text get_desc (bool can_colorize) const override;
++  void print_desc (pretty_printer &pp) const override;
+   bool connect_to_next_event_p () const final override { return true; }
+ 
+ protected:
+@@ -465,9 +465,9 @@ public:
+   {
+   }
+ 
+-  label_text get_desc (bool /*can_colorize*/) const final override
++  void print_desc (pretty_printer &pp) const final override
+   {
+-    return label_text::borrow ("...to here");
++    pp_string (&pp, "...to here");
+   }
+ };
+ 
+@@ -479,7 +479,7 @@ public:
+   call_event (const exploded_edge &eedge,
+ 	      const event_loc_info &loc_info);
+ 
+-  label_text get_desc (bool can_colorize) const override;
++  void print_desc (pretty_printer &pp) const override;
+   meaning get_meaning () const override;
+ 
+   bool is_call_p () const final override;
+@@ -500,7 +500,7 @@ public:
+   return_event (const exploded_edge &eedge,
+ 		const event_loc_info &loc_info);
+ 
+-  label_text get_desc (bool can_colorize) const final override;
++  void print_desc (pretty_printer &pp) const final override;
+   meaning get_meaning () const override;
+ 
+   bool is_return_p () const final override;
+@@ -522,7 +522,7 @@ public:
+   {
+   }
+ 
+-  label_text get_desc (bool can_colorize) const final override;
++  void print_desc (pretty_printer &pp) const final override;
+   meaning get_meaning () const override;
+   bool connect_to_next_event_p () const final override { return true; }
+ 
+@@ -541,9 +541,9 @@ public:
+   {
+   }
+ 
+-  label_text get_desc (bool /*can_colorize*/) const final override
++  void print_desc (pretty_printer &pp) const final override
+   {
+-    return label_text::borrow ("...to here");
++    pp_string (&pp, "...to here");
+   }
+ };
+ 
+@@ -568,7 +568,7 @@ public:
+     gcc_assert (LOCATION_BLOCK (loc) == NULL);
+   }
+ 
+-  label_text get_desc (bool /*can_colorize*/) const final override;
++  void print_desc (pretty_printer &) const final override;
+   meaning get_meaning () const override;
+ 
+ private:
+@@ -589,7 +589,7 @@ public:
+   {
+   }
+ 
+-  label_text get_desc (bool can_colorize) const final override;
++  void print_desc (pretty_printer &pp) const final override;
+ 
+   void prepare_for_emission (checker_path *path,
+ 			     pending_diagnostic *pd,
+@@ -638,7 +638,7 @@ public:
+   {
+   }
+ 
+-  label_text get_desc (bool can_colorize) const final override;
++  void print_desc (pretty_printer &pp) const final override;
+ };
+ 
+ /* A concrete event subclass for rewinding from a longjmp to a setjmp,
+@@ -655,7 +655,7 @@ public:
+   {
+   }
+ 
+-  label_text get_desc (bool can_colorize) const final override;
++  void print_desc (pretty_printer &pp) const final override;
+ 
+   void prepare_for_emission (checker_path *path,
+ 			     pending_diagnostic *pd,
+@@ -683,7 +683,7 @@ public:
+   {
+   }
+ 
+-  label_text get_desc (bool can_colorize) const final override;
++  void print_desc (pretty_printer &pp) const final override;
+   meaning get_meaning () const override;
+ 
+   const exploded_node *get_exploded_node () const { return m_enode; }
+diff --git a/gcc/analyzer/checker-path.cc b/gcc/analyzer/checker-path.cc
+index cfbbc0b25f35..98b598841742 100644
+--- a/gcc/analyzer/checker-path.cc
++++ b/gcc/analyzer/checker-path.cc
+@@ -84,8 +84,9 @@ checker_path::dump (pretty_printer *pp) const
+     {
+       if (i > 0)
+ 	pp_string (pp, ", ");
+-      label_text event_desc (e->get_desc (false));
+-      pp_printf (pp, "\"%s\"", event_desc.get ());
++      pp_character (pp, '"');
++      e->print_desc (*pp);
++      pp_character (pp, '"');
+     }
+   pp_character (pp, ']');
+ }
+@@ -135,7 +136,7 @@ checker_path::debug () const
+   int i;
+   FOR_EACH_VEC_ELT (m_events, i, e)
+     {
+-      label_text event_desc (e->get_desc (false));
++      label_text event_desc (e->get_desc ());
+       fprintf (stderr,
+ 	       "[%i]: %s \"%s\"\n",
+ 	       i,
+diff --git a/gcc/analyzer/diagnostic-manager.cc b/gcc/analyzer/diagnostic-manager.cc
+index 2363ae5df19c..0e5e96c3f936 100644
+--- a/gcc/analyzer/diagnostic-manager.cc
++++ b/gcc/analyzer/diagnostic-manager.cc
+@@ -2833,7 +2833,7 @@ diagnostic_manager::prune_interproc_events (checker_path *path) const
+ 	      if (get_logger ())
+ 		{
+ 		  label_text desc
+-		    (path->get_checker_event (idx)->get_desc (false));
++		    (path->get_checker_event (idx)->get_desc ());
+ 		  log ("filtering events %i-%i:"
+ 		       " irrelevant call/entry/return: %s",
+ 		       idx, idx + 2, desc.get ());
+@@ -2855,7 +2855,7 @@ diagnostic_manager::prune_interproc_events (checker_path *path) const
+ 	      if (get_logger ())
+ 		{
+ 		  label_text desc
+-		    (path->get_checker_event (idx)->get_desc (false));
++		    (path->get_checker_event (idx)->get_desc ());
+ 		  log ("filtering events %i-%i:"
+ 		       " irrelevant call/return: %s",
+ 		       idx, idx + 1, desc.get ());
+@@ -2952,7 +2952,7 @@ diagnostic_manager::prune_system_headers (checker_path *path) const
+ 	      {
+ 		if (get_logger ())
+ 		  {
+-		    label_text desc (event->get_desc (false));
++		    label_text desc (event->get_desc ());
+ 		    log ("filtering event %i:"
+ 			 "system header entry event: %s",
+ 			 idx, desc.get ());
+diff --git a/gcc/analyzer/engine.cc b/gcc/analyzer/engine.cc
+index 0524750d7a3c..3b23990ef80f 100644
+--- a/gcc/analyzer/engine.cc
++++ b/gcc/analyzer/engine.cc
+@@ -1668,9 +1668,9 @@ public:
+     return true;
+   }
+ 
+-  label_text get_desc (bool /*can_colorize*/) const final override
++  void print_desc (pretty_printer &pp) const final override
+   {
+-    return m_summary->get_desc ();
++    pp_string (&pp, m_summary->get_desc ().get ());
+   }
+ 
+ private:
+@@ -1884,19 +1884,22 @@ public:
+     return false;
+   }
+ 
+-  label_text describe_final_event (const evdesc::final_event &ev) final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &) final override
+   {
+     if (m_stack_pop_event)
+-      return ev.formatted_print
+-	("%qs called after enclosing function of %qs returned at %@",
+-	 get_user_facing_name (m_longjmp_call),
+-	 get_user_facing_name (m_setjmp_call),
+-	 m_stack_pop_event->get_id_ptr ());
++      pp_printf (&pp,
++		 "%qs called after enclosing function of %qs returned at %@",
++		 get_user_facing_name (m_longjmp_call),
++		 get_user_facing_name (m_setjmp_call),
++		 m_stack_pop_event->get_id_ptr ());
+     else
+-      return ev.formatted_print
+-	("%qs called after enclosing function of %qs has returned",
+-	 get_user_facing_name (m_longjmp_call),
+-	 get_user_facing_name (m_setjmp_call));;
++      pp_printf (&pp,
++		 "%qs called after enclosing function of %qs has returned",
++		 get_user_facing_name (m_longjmp_call),
++		 get_user_facing_name (m_setjmp_call));
++    return true;
+   }
+ 
+ 
+@@ -2750,12 +2753,12 @@ public:
+   {
+   }
+ 
+-  label_text get_desc (bool can_colorize) const final override
++  void
++  print_desc (pretty_printer &pp) const final override
+   {
+-    return make_label_text
+-      (can_colorize,
+-       "function %qE marked with %<__attribute__((tainted_args))%>",
+-       m_fndecl);
++    pp_printf (&pp,
++	       "function %qE marked with %<__attribute__((tainted_args))%>",
++	       m_fndecl);
+   }
+ 
+ private:
+@@ -3169,12 +3172,12 @@ public:
+   {
+   }
+ 
+-  label_text get_desc (bool can_colorize) const final override
++  void print_desc (pretty_printer &pp) const final override
+   {
+-    return make_label_text (can_colorize,
+-			    "field %qE of %qT"
+-			    " is marked with %<__attribute__((tainted_args))%>",
+-			    m_field, DECL_CONTEXT (m_field));
++    pp_printf (&pp,
++	       "field %qE of %qT"
++	       " is marked with %<__attribute__((tainted_args))%>",
++	       m_field, DECL_CONTEXT (m_field));
+   }
+ 
+ private:
+@@ -3195,12 +3198,12 @@ public:
+   {
+   }
+ 
+-  label_text get_desc (bool can_colorize) const final override
++  void print_desc (pretty_printer &pp) const final override
+   {
+-    return make_label_text (can_colorize,
+-			    "function %qE used as initializer for field %qE"
+-			    " marked with %<__attribute__((tainted_args))%>",
+-			    get_fndecl (), m_field);
++    pp_printf (&pp,
++	       "function %qE used as initializer for field %qE"
++	       " marked with %<__attribute__((tainted_args))%>",
++	       get_fndecl (), m_field);
+   }
+ 
+ private:
+@@ -4014,9 +4017,11 @@ public:
+     return ctxt.warn ("jump through null pointer");
+   }
+ 
+-  label_text describe_final_event (const evdesc::final_event &ev) final override
++  bool describe_final_event (pretty_printer &pp,
++			     const evdesc::final_event &) final override
+   {
+-    return ev.formatted_print ("jump through null pointer here");
++    pp_string (&pp, "jump through null pointer here");
++    return true;
+   }
+ 
+ private:
+diff --git a/gcc/analyzer/infinite-loop.cc b/gcc/analyzer/infinite-loop.cc
+index 6ac0a5b373d8..4abfb3cdc59c 100644
+--- a/gcc/analyzer/infinite-loop.cc
++++ b/gcc/analyzer/infinite-loop.cc
+@@ -136,7 +136,7 @@ public:
+   {
+   }
+ 
+-  label_text get_desc (bool can_colorize) const final override
++  void print_desc (pretty_printer &pp) const final override
+   {
+     bool user_facing = !flag_analyzer_verbose_edges;
+     label_text edge_desc (m_sedge->get_description (user_facing));
+@@ -144,21 +144,21 @@ public:
+       {
+ 	if (edge_desc.get () && strlen (edge_desc.get ()) > 0)
+ 	  {
+-	    label_text cond_desc = maybe_describe_condition (can_colorize);
+-	    label_text result;
++	    label_text cond_desc
++	      = maybe_describe_condition (pp_show_color (&pp));
+ 	    if (cond_desc.get ())
+-	      return make_label_text
+-		(can_colorize,
+-		 "%s: always following %qs branch...",
+-		 cond_desc.get (), edge_desc.get ());
++	      pp_printf (&pp,
++			 "%s: always following %qs branch...",
++			 cond_desc.get (), edge_desc.get ());
+ 	    else
+-	      return make_label_text
+-		(can_colorize,
+-		 "if it ever follows %qs branch, it will always do so...",
+-		 edge_desc.get ());
++	      pp_printf (&pp,
++			 "if it ever follows %qs branch,"
++			 " it will always do so...",
++			 edge_desc.get ());
+ 	  }
+       }
+-    return start_cfg_edge_event::get_desc (can_colorize);
++    else
++      return start_cfg_edge_event::print_desc (pp);
+   }
+ };
+ 
+@@ -171,9 +171,9 @@ public:
+   {
+   }
+ 
+-  label_text get_desc (bool) const final override
++  void print_desc (pretty_printer &pp) const final override
+   {
+-    return label_text::borrow ("looping back...");
++    pp_string (&pp, "looping back...");
+   }
+ };
+ 
+@@ -221,9 +221,12 @@ public:
+     return true;
+   }
+ 
+-  label_text describe_final_event (const evdesc::final_event &ev) final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &ev) final override
+   {
+-    return ev.formatted_print ("infinite loop here");
++    pp_string (&pp, "infinite loop here");
++    return true;
+   }
+ 
+   /* Customize the location where the warning_event appears.  */
+diff --git a/gcc/analyzer/infinite-recursion.cc b/gcc/analyzer/infinite-recursion.cc
+index 885f9a8a9417..343115eadbaa 100644
+--- a/gcc/analyzer/infinite-recursion.cc
++++ b/gcc/analyzer/infinite-recursion.cc
+@@ -103,17 +103,20 @@ public:
+     return ctxt.warn ("infinite recursion");
+   }
+ 
+-  label_text describe_final_event (const evdesc::final_event &ev) final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &) final override
+   {
+     const int frames_consumed = (m_new_entry_enode->get_stack_depth ()
+ 				 - m_prev_entry_enode->get_stack_depth ());
+     if (frames_consumed > 1)
+-      return ev.formatted_print
+-	("apparently infinite chain of mutually-recursive function calls,"
+-	 " consuming %i stack frames per recursion",
+-	 frames_consumed);
++      pp_printf (&pp,
++		 "apparently infinite chain of mutually-recursive function"
++		 " calls, consuming %i stack frames per recursion",
++		 frames_consumed);
+     else
+-      return ev.formatted_print ("apparently infinite recursion");
++      pp_string (&pp, "apparently infinite recursion");
++    return true;
+   }
+ 
+   void
+@@ -136,25 +139,26 @@ public:
+       {
+       }
+ 
+-      label_text
+-      get_desc (bool can_colorize) const final override
++      void
++      print_desc (pretty_printer &pp) const final override
+       {
+ 	if (m_topmost)
+ 	  {
+ 	    if (m_pd.m_prev_entry_event
+ 		&& m_pd.m_prev_entry_event->get_id_ptr ()->known_p ())
+-	      return make_label_text
+-		(can_colorize,
+-		 "recursive entry to %qE; previously entered at %@",
+-		 m_effective_fndecl,
+-		 m_pd.m_prev_entry_event->get_id_ptr ());
++	      pp_printf (&pp,
++			 "recursive entry to %qE; previously entered at %@",
++			 m_effective_fndecl,
++			 m_pd.m_prev_entry_event->get_id_ptr ());
+ 	    else
+-	      return make_label_text (can_colorize, "recursive entry to %qE",
+-				      m_effective_fndecl);
++	      pp_printf (&pp,
++			 "recursive entry to %qE",
++			 m_effective_fndecl);
+ 	  }
+ 	else
+-	  return make_label_text (can_colorize, "initial entry to %qE",
+-				  m_effective_fndecl);
++	  pp_printf (&pp,
++		     "initial entry to %qE",
++		     m_effective_fndecl);
+       }
+ 
+     private:
+diff --git a/gcc/analyzer/kf.cc b/gcc/analyzer/kf.cc
+index 5c3a71fbb49c..33a18867a999 100644
+--- a/gcc/analyzer/kf.cc
++++ b/gcc/analyzer/kf.cc
+@@ -817,14 +817,19 @@ public:
+     return warned;
+   }
+ 
+-  label_text describe_final_event (const evdesc::final_event &ev) final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &) final override
+   {
+     if (m_var_decl)
+-      return ev.formatted_print ("%qE on a pointer to automatic variable %qE",
+-				 m_fndecl, m_var_decl);
++      pp_printf  (&pp,
++		  "%qE on a pointer to automatic variable %qE",
++		  m_fndecl, m_var_decl);
+     else
+-      return ev.formatted_print ("%qE on a pointer to an on-stack buffer",
+-				 m_fndecl);
++      pp_printf  (&pp,
++		  "%qE on a pointer to an on-stack buffer",
++		  m_fndecl);
++    return true;
+   }
+ 
+   void mark_interesting_stuff (interesting_t *interest) final override
+@@ -969,11 +974,11 @@ kf_realloc::impl_call_post (const call_details &cd) const
+     {
+     }
+ 
+-    label_text get_desc (bool can_colorize) const final override
++    void print_desc (pretty_printer &pp) const final override
+     {
+-      return make_label_text (can_colorize,
+-			      "when %qE succeeds, without moving buffer",
+-			      get_fndecl ());
++      pp_printf (&pp,
++		 "when %qE succeeds, without moving buffer",
++		 get_fndecl ());
+     }
+ 
+     bool update_model (region_model *model,
+@@ -1022,11 +1027,11 @@ kf_realloc::impl_call_post (const call_details &cd) const
+     {
+     }
+ 
+-    label_text get_desc (bool can_colorize) const final override
++    void print_desc (pretty_printer &pp) const final override
+     {
+-      return make_label_text (can_colorize,
+-			      "when %qE succeeds, moving buffer",
+-			      get_fndecl ());
++      pp_printf (&pp,
++		 "when %qE succeeds, moving buffer",
++		 get_fndecl ());
+     }
+     bool update_model (region_model *model,
+ 		       const exploded_edge *,
+@@ -1164,16 +1169,16 @@ kf_strchr::impl_call_post (const call_details &cd) const
+     {
+     }
+ 
+-    label_text get_desc (bool can_colorize) const final override
++    void print_desc (pretty_printer &pp) const final override
+     {
+       if (m_found)
+-	return make_label_text (can_colorize,
+-				"when %qE returns non-NULL",
+-				get_fndecl ());
++	pp_printf (&pp,
++		   "when %qE returns non-NULL",
++		   get_fndecl ());
+       else
+-	return make_label_text (can_colorize,
+-				"when %qE returns NULL",
+-				get_fndecl ());
++	pp_printf (&pp,
++		   "when %qE returns NULL",
++		   get_fndecl ());
+     }
+ 
+     bool update_model (region_model *model,
+@@ -1520,16 +1525,16 @@ kf_strncpy::impl_call_post (const call_details &cd) const
+     {
+     }
+ 
+-    label_text get_desc (bool can_colorize) const final override
++    void print_desc (pretty_printer &pp) const final override
+     {
+       if (m_truncated_read)
+-	return make_label_text (can_colorize,
+-				"when %qE truncates the source string",
+-				get_fndecl ());
++	pp_printf (&pp,
++		   "when %qE truncates the source string",
++		   get_fndecl ());
+       else
+-	return make_label_text (can_colorize,
+-				"when %qE copies the full source string",
+-				get_fndecl ());
++	pp_printf (&pp,
++		   "when %qE copies the full source string",
++		   get_fndecl ());
+     }
+ 
+     bool update_model (region_model *model,
+@@ -1721,16 +1726,16 @@ kf_strstr::impl_call_post (const call_details &cd) const
+     {
+     }
+ 
+-    label_text get_desc (bool can_colorize) const final override
++    void print_desc (pretty_printer &pp) const final override
+     {
+       if (m_found)
+-	return make_label_text (can_colorize,
+-				"when %qE returns non-NULL",
+-				get_fndecl ());
++	pp_printf (&pp,
++		   "when %qE returns non-NULL",
++		   get_fndecl ());
+       else
+-	return make_label_text (can_colorize,
+-				"when %qE returns NULL",
+-				get_fndecl ());
++	pp_printf (&pp,
++		   "when %qE returns NULL",
++		   get_fndecl ());
+     }
+ 
+     bool update_model (region_model *model,
+@@ -1815,13 +1820,15 @@ public:
+       return false;
+     }
+ 
+-    label_text describe_final_event (const evdesc::final_event &ev)
+-      final override
++    bool
++    describe_final_event (pretty_printer &pp,
++			  const evdesc::final_event &) final override
+     {
+-      return ev.formatted_print
+-	("calling %qD for first time with NULL as argument 1"
+-	 " has undefined behavior",
+-	 get_callee_fndecl ());
++      pp_printf (&pp,
++		 "calling %qD for first time with NULL as argument 1"
++		 " has undefined behavior",
++		 get_callee_fndecl ());
++      return true;
+     }
+   };
+ 
+@@ -1845,33 +1852,30 @@ public:
+     {
+     }
+ 
+-    label_text get_desc (bool can_colorize) const final override
++    void print_desc (pretty_printer &pp) const final override
+     {
+       if (m_nonnull_str)
+ 	{
+ 	  if (m_found)
+-	    return make_label_text
+-	      (can_colorize,
+-	       "when %qE on non-NULL string returns non-NULL",
+-	       get_fndecl ());
++	    pp_printf (&pp,
++		       "when %qE on non-NULL string returns non-NULL",
++		       get_fndecl ());
+ 	  else
+-	    return make_label_text
+-	      (can_colorize,
+-	       "when %qE on non-NULL string returns NULL",
+-	       get_fndecl ());
++	    pp_printf (&pp,
++		       "when %qE on non-NULL string returns NULL",
++		       get_fndecl ());
+ 	}
+       else
+ 	{
+ 	  if (m_found)
+-	    return make_label_text
+-	      (can_colorize,
+-	       "when %qE with NULL string (using prior) returns non-NULL",
+-	       get_fndecl ());
++	    pp_printf (&pp,
++		       "when %qE with NULL string (using prior) returns"
++		       " non-NULL",
++		       get_fndecl ());
+ 	  else
+-	    return make_label_text
+-	      (can_colorize,
+-	       "when %qE with NULL string (using prior) returns NULL",
+-	       get_fndecl ());
++	    pp_printf (&pp,
++		       "when %qE with NULL string (using prior) returns NULL",
++		       get_fndecl ());
+ 	}
+     }
+ 
+diff --git a/gcc/analyzer/pending-diagnostic.cc b/gcc/analyzer/pending-diagnostic.cc
+index a900839375cb..01a7697b3bd8 100644
+--- a/gcc/analyzer/pending-diagnostic.cc
++++ b/gcc/analyzer/pending-diagnostic.cc
+@@ -83,31 +83,6 @@ interesting_t::dump_to_pp (pretty_printer *pp, bool simple) const
+   pp_string (pp, "]}");
+ }
+ 
+-/* Generate a label_text by printing FMT.
+-
+-   Use a clone of the global_dc for formatting callbacks.
+-
+-   Use this evdesc::event_desc's m_colorize flag to control colorization
+-   (so that e.g. we can disable it for JSON output).  */
+-
+-label_text
+-evdesc::event_desc::formatted_print (const char *fmt, ...) const
+-{
+-  auto pp = global_dc->clone_printer ();
+-
+-  pp_show_color (pp.get ()) = m_colorize;
+-
+-  rich_location rich_loc (line_table, UNKNOWN_LOCATION);
+-  va_list ap;
+-  va_start (ap, fmt);
+-  text_info ti (_(fmt), &ap, 0, nullptr, &rich_loc);
+-  pp_format (pp.get (), &ti);
+-  pp_output_formatted_text (pp.get ());
+-  va_end (ap);
+-
+-  return label_text::take (xstrdup (pp_formatted_text (pp.get ())));
+-}
+-
+ /* class diagnostic_emission_context.  */
+ 
+ /* Get the pending_diagnostic being emitted.  */
+diff --git a/gcc/analyzer/pending-diagnostic.h b/gcc/analyzer/pending-diagnostic.h
+index ee1f6204f2d2..d95ccb20aec1 100644
+--- a/gcc/analyzer/pending-diagnostic.h
++++ b/gcc/analyzer/pending-diagnostic.h
+@@ -50,29 +50,17 @@ struct interesting_t
+ 
+ namespace evdesc {
+ 
+-struct event_desc
+-{
+-  event_desc (bool colorize) : m_colorize (colorize) {}
+-
+-  label_text formatted_print (const char *fmt, ...) const
+-    ATTRIBUTE_GCC_DIAG(2,3);
+-
+-  bool m_colorize;
+-};
+-
+ /* For use by pending_diagnostic::describe_state_change.  */
+ 
+-struct state_change : public event_desc
++struct state_change
+ {
+-  state_change (bool colorize,
+-		tree expr,
++  state_change (tree expr,
+ 		tree origin,
+ 		state_machine::state_t old_state,
+ 		state_machine::state_t new_state,
+ 		diagnostic_event_id_t event_id,
+ 		const state_change_event &event)
+-  : event_desc (colorize),
+-    m_expr (expr), m_origin (origin),
++  : m_expr (expr), m_origin (origin),
+     m_old_state (old_state), m_new_state (new_state),
+     m_event_id (event_id), m_event (event)
+   {}
+@@ -89,13 +77,11 @@ struct state_change : public event_desc
+ 
+ /* For use by pending_diagnostic::describe_call_with_state.  */
+ 
+-struct call_with_state : public event_desc
++struct call_with_state
+ {
+-  call_with_state (bool colorize,
+-		   tree caller_fndecl, tree callee_fndecl,
++  call_with_state (tree caller_fndecl, tree callee_fndecl,
+ 		   tree expr, state_machine::state_t state)
+-  : event_desc (colorize),
+-    m_caller_fndecl (caller_fndecl),
++  : m_caller_fndecl (caller_fndecl),
+     m_callee_fndecl (callee_fndecl),
+     m_expr (expr),
+     m_state (state)
+@@ -110,13 +96,11 @@ struct call_with_state : public event_desc
+ 
+ /* For use by pending_diagnostic::describe_return_of_state.  */
+ 
+-struct return_of_state : public event_desc
++struct return_of_state
+ {
+-  return_of_state (bool colorize,
+-		   tree caller_fndecl, tree callee_fndecl,
++  return_of_state (tree caller_fndecl, tree callee_fndecl,
+ 		   state_machine::state_t state)
+-  : event_desc (colorize),
+-    m_caller_fndecl (caller_fndecl),
++  : m_caller_fndecl (caller_fndecl),
+     m_callee_fndecl (callee_fndecl),
+     m_state (state)
+   {
+@@ -129,13 +113,11 @@ struct return_of_state : public event_desc
+ 
+ /* For use by pending_diagnostic::describe_final_event.  */
+ 
+-struct final_event : public event_desc
++struct final_event
+ {
+-  final_event (bool colorize,
+-	       tree expr, state_machine::state_t state,
++  final_event (tree expr, state_machine::state_t state,
+ 	       const warning_event &event)
+-  : event_desc (colorize),
+-    m_expr (expr), m_state (state), m_event (event)
++  : m_expr (expr), m_state (state), m_event (event)
+   {}
+ 
+   tree m_expr;
+@@ -266,12 +248,16 @@ class pending_diagnostic
+      - "freed here"
+      - "use after free here"
+      Note how in both cases the first event is a "free": the best
+-     description to use depends on the diagnostic.  */
++     description to use depends on the diagnostic.
+ 
+-  virtual label_text describe_state_change (const evdesc::state_change &)
++     Print the description to PP and return true,
++     or do nothing and return false.  */
++
++  virtual bool describe_state_change (pretty_printer &,
++				      const evdesc::state_change &)
+   {
+     /* Default no-op implementation.  */
+-    return label_text ();
++    return false;
+   }
+ 
+   /* Vfunc for implementing diagnostic_event::get_meaning for
+@@ -291,10 +277,11 @@ class pending_diagnostic
+      to make it clearer how the freed value moves from caller to
+      callee.  */
+ 
+-  virtual label_text describe_call_with_state (const evdesc::call_with_state &)
++  virtual bool describe_call_with_state (pretty_printer &,
++					 const evdesc::call_with_state &)
+   {
+     /* Default no-op implementation.  */
+-    return label_text ();
++    return false;
+   }
+ 
+   /* Precision-of-wording vfunc for describing an interprocedural return
+@@ -306,10 +293,11 @@ class pending_diagnostic
+      to make it clearer how the unchecked value moves from callee
+      back to caller.  */
+ 
+-  virtual label_text describe_return_of_state (const evdesc::return_of_state &)
++  virtual bool describe_return_of_state (pretty_printer &,
++					 const evdesc::return_of_state &)
+   {
+     /* Default no-op implementation.  */
+-    return label_text ();
++    return false;
+   }
+ 
+   /* Precision-of-wording vfunc for describing the final event within a
+@@ -320,10 +308,11 @@ class pending_diagnostic
+      and a use-after-free might use
+       - "use after 'free' here; memory was freed at (2)".  */
+ 
+-  virtual label_text describe_final_event (const evdesc::final_event &)
++  virtual bool describe_final_event (pretty_printer &,
++				     const evdesc::final_event &)
+   {
+     /* Default no-op implementation.  */
+-    return label_text ();
++    return false;
+   }
+ 
+   /* End of precision-of-wording vfuncs.  */
+diff --git a/gcc/analyzer/region-model.cc b/gcc/analyzer/region-model.cc
+index a0fd2aad4910..a76f1299ac07 100644
+--- a/gcc/analyzer/region-model.cc
++++ b/gcc/analyzer/region-model.cc
+@@ -672,25 +672,42 @@ public:
+       }
+   }
+ 
+-  label_text describe_final_event (const evdesc::final_event &ev) final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &) final override
+   {
+     switch (m_pkind)
+       {
+       default:
+ 	gcc_unreachable ();
+       case POISON_KIND_UNINIT:
+-	return ev.formatted_print ("use of uninitialized value %qE here",
+-				   m_expr);
++	{
++	  pp_printf (&pp,
++		     "use of uninitialized value %qE here",
++		     m_expr);
++	  return true;
++	}
+       case POISON_KIND_FREED:
+-	return ev.formatted_print ("use after %<free%> of %qE here",
+-				   m_expr);
++	{
++	  pp_printf (&pp,
++		     "use after %<free%> of %qE here",
++		     m_expr);
++	  return true;
++	}
+       case POISON_KIND_DELETED:
+-	return ev.formatted_print ("use after %<delete%> of %qE here",
+-				   m_expr);
++	{
++	  pp_printf (&pp,
++		     "use after %<delete%> of %qE here",
++		     m_expr);
++	  return true;
++	}
+       case POISON_KIND_POPPED_STACK:
+-	return ev.formatted_print
+-	  ("dereferencing pointer %qE to within stale stack frame",
+-	   m_expr);
++	{
++	  pp_printf (&pp,
++		     "dereferencing pointer %qE to within stale stack frame",
++		     m_expr);
++	  return true;
++	}
+       }
+   }
+ 
+@@ -775,9 +792,14 @@ public:
+     return ctxt.warn ("shift by negative count (%qE)", m_count_cst);
+   }
+ 
+-  label_text describe_final_event (const evdesc::final_event &ev) final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &) final override
+   {
+-    return ev.formatted_print ("shift by negative amount here (%qE)", m_count_cst);
++    pp_printf (&pp,
++	       "shift by negative amount here (%qE)",
++	       m_count_cst);
++    return true;
+   }
+ 
+ private:
+@@ -822,9 +844,14 @@ public:
+ 		      m_count_cst, m_operand_precision);
+   }
+ 
+-  label_text describe_final_event (const evdesc::final_event &ev) final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &) final override
+   {
+-    return ev.formatted_print ("shift by count %qE here", m_count_cst);
++    pp_printf (&pp,
++	       "shift by count %qE here",
++	       m_count_cst);
++    return true;
+   }
+ 
+ private:
+@@ -853,14 +880,16 @@ public:
+     {
+     }
+ 
+-    label_text get_desc (bool) const
++    void print_desc (pretty_printer &pp) const final override
+     {
+       if (m_is_lhs)
+-	return label_text::borrow ("underlying object for left-hand side"
+-				   " of subtraction created here");
++	pp_string (&pp,
++		   "underlying object for left-hand side"
++		   " of subtraction created here");
+       else
+-	return label_text::borrow ("underlying object for right-hand side"
+-				   " of subtraction created here");
++	pp_string (&pp,
++		   "underlying object for right-hand side"
++		   " of subtraction created here");
+     }
+ 
+   private:
+@@ -920,11 +949,14 @@ public:
+ 	(make_unique<ptrdiff_region_creation_event> (loc_info, false));
+   }
+ 
+-  label_text describe_final_event (const evdesc::final_event &ev) final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &) final override
+   {
+-    return ev.formatted_print
+-      ("subtraction of pointers has undefined behavior if"
+-       " they do not point into the same array object");
++    pp_string (&pp,
++	       "subtraction of pointers has undefined behavior if"
++	       " they do not point into the same array object");
++    return true;
+   }
+ 
+   void mark_interesting_stuff (interesting_t *interesting) final override
+@@ -3120,16 +3152,30 @@ public:
+     return warned;
+   }
+ 
+-  label_text describe_final_event (const evdesc::final_event &ev) final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &) final override
+   {
+     switch (m_reg->get_kind ())
+       {
+       default:
+-	return ev.formatted_print ("write to %<const%> object %qE here", m_decl);
++	{
++	  pp_printf (&pp,
++		     "write to %<const%> object %qE here", m_decl);
++	  return true;
++	}
+       case RK_FUNCTION:
+-	return ev.formatted_print ("write to function %qE here", m_decl);
++	{
++	  pp_printf (&pp,
++		     "write to function %qE here", m_decl);
++	  return true;
++	}
+       case RK_LABEL:
+-	return ev.formatted_print ("write to label %qE here", m_decl);
++	{
++	  pp_printf (&pp,
++		     "write to label %qE here", m_decl);
++	  return true;
++	}
+       }
+   }
+ 
+@@ -3171,9 +3217,12 @@ public:
+        but it is not available at this point.  */
+   }
+ 
+-  label_text describe_final_event (const evdesc::final_event &ev) final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &) final override
+   {
+-    return ev.formatted_print ("write to string literal here");
++    pp_string (&pp, "write to string literal here");
++    return true;
+   }
+ 
+ private:
+@@ -3374,35 +3423,50 @@ public:
+ 		      " of the pointee's size");
+   }
+ 
+-  label_text describe_final_event (const evdesc::final_event &ev) final
+-  override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &) final override
+   {
+     tree pointee_type = TREE_TYPE (m_lhs->get_type ());
+     if (m_has_allocation_event)
+-      return ev.formatted_print ("assigned to %qT here;"
+-				 " %<sizeof (%T)%> is %qE",
+-				 m_lhs->get_type (), pointee_type,
+-				 size_in_bytes (pointee_type));
++      {
++	pp_printf (&pp,
++		   "assigned to %qT here;"
++		   " %<sizeof (%T)%> is %qE",
++		   m_lhs->get_type (), pointee_type,
++		   size_in_bytes (pointee_type));
++	return true;
++      }
+     /* Fallback: Typically, we should always see an allocation_event
+        before.  */
+     if (m_expr)
+       {
+ 	if (TREE_CODE (m_expr) == INTEGER_CST)
+-	  return ev.formatted_print ("allocated %E bytes and assigned to"
+-				    " %qT here; %<sizeof (%T)%> is %qE",
+-				    m_expr, m_lhs->get_type (), pointee_type,
+-				    size_in_bytes (pointee_type));
++	  {
++	    pp_printf (&pp,
++		       "allocated %E bytes and assigned to"
++		       " %qT here; %<sizeof (%T)%> is %qE",
++		       m_expr, m_lhs->get_type (), pointee_type,
++		       size_in_bytes (pointee_type));
++	    return true;
++	  }
+ 	else
+-	  return ev.formatted_print ("allocated %qE bytes and assigned to"
+-				    " %qT here; %<sizeof (%T)%> is %qE",
+-				    m_expr, m_lhs->get_type (), pointee_type,
+-				    size_in_bytes (pointee_type));
++	  {
++	    pp_printf (&pp,
++		       "allocated %qE bytes and assigned to"
++		       " %qT here; %<sizeof (%T)%> is %qE",
++		       m_expr, m_lhs->get_type (), pointee_type,
++		       size_in_bytes (pointee_type));
++	    return true;
++	  }
+       }
+ 
+-    return ev.formatted_print ("allocated and assigned to %qT here;"
+-			       " %<sizeof (%T)%> is %qE",
+-			       m_lhs->get_type (), pointee_type,
+-			       size_in_bytes (pointee_type));
++    pp_printf (&pp,
++	       "allocated and assigned to %qT here;"
++	       " %<sizeof (%T)%> is %qE",
++	       m_lhs->get_type (), pointee_type,
++	       size_in_bytes (pointee_type));
++    return true;
+   }
+ 
+   void
+@@ -4490,21 +4554,21 @@ region_model::check_for_null_terminated_string_arg (const call_details &cd,
+     {
+     }
+ 
+-    label_text get_desc (bool can_colorize) const final override
++    void print_desc (pretty_printer &pp) const final override
+     {
+       if (m_arg_details.m_arg_expr)
+-	return make_label_text (can_colorize,
+-				"while looking for null terminator"
+-				" for argument %i (%qE) of %qD...",
+-				m_arg_details.m_arg_idx + 1,
+-				m_arg_details.m_arg_expr,
+-				m_arg_details.m_called_fndecl);
++	pp_printf (&pp,
++		   "while looking for null terminator"
++		   " for argument %i (%qE) of %qD...",
++		   m_arg_details.m_arg_idx + 1,
++		   m_arg_details.m_arg_expr,
++		   m_arg_details.m_called_fndecl);
+       else
+-	return make_label_text (can_colorize,
+-				"while looking for null terminator"
+-				" for argument %i of %qD...",
+-				m_arg_details.m_arg_idx + 1,
+-				m_arg_details.m_called_fndecl);
++	pp_printf (&pp,
++		   "while looking for null terminator"
++		   " for argument %i of %qD...",
++		   m_arg_details.m_arg_idx + 1,
++		   m_arg_details.m_called_fndecl);
+     }
+ 
+   private:
+@@ -6670,14 +6734,19 @@ public:
+     return warned;
+   }
+ 
+-  label_text describe_final_event (const evdesc::final_event &ev) final
+-  override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &) final override
+   {
+     if (m_arg)
+-      return ev.formatted_print ("operand %qE is of type %qT",
+-				 m_arg, TREE_TYPE (m_arg));
+-    return ev.formatted_print ("at least one operand of the size argument is"
+-			       " of a floating-point type");
++      pp_printf (&pp,
++		 "operand %qE is of type %qT",
++		 m_arg, TREE_TYPE (m_arg));
++    else
++      pp_printf (&pp,
++		 "at least one operand of the size argument is"
++		 " of a floating-point type");
++    return true;
+   }
+ 
+ private:
+@@ -6938,19 +7007,24 @@ public:
+     return warned;
+   }
+ 
+-  label_text describe_final_event (const evdesc::final_event &) final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &) final override
+   {
+     enum memory_space mem_space = get_src_memory_space ();
+     switch (mem_space)
+       {
+       default:
+-	return label_text::borrow ("uninitialized data copied here");
++	pp_string (&pp, "uninitialized data copied here");
++	return true;
+ 
+       case MEMSPACE_STACK:
+-	return label_text::borrow ("uninitialized data copied from stack here");
++	pp_string (&pp, "uninitialized data copied from stack here");
++	return true;
+ 
+       case MEMSPACE_HEAP:
+-	return label_text::borrow ("uninitialized data copied from heap here");
++	pp_string (&pp, "uninitialized data copied from heap here");
++	return true;
+       }
+   }
+ 
+diff --git a/gcc/analyzer/sm-fd.cc b/gcc/analyzer/sm-fd.cc
+index 3396b1d11228..aacc2123b243 100644
+--- a/gcc/analyzer/sm-fd.cc
++++ b/gcc/analyzer/sm-fd.cc
+@@ -29,6 +29,7 @@ along with GCC; see the file COPYING3.  If not see
+ #include "basic-block.h"
+ #include "gimple.h"
+ #include "options.h"
++#include "diagnostic-core.h"
+ #include "diagnostic-path.h"
+ #include "analyzer/analyzer.h"
+ #include "diagnostic-event-id.h"
+@@ -292,73 +293,111 @@ public:
+     return same_tree_p (m_arg, ((const fd_diagnostic &)base_other).m_arg);
+   }
+ 
+-  label_text
+-  describe_state_change (const evdesc::state_change &change) override
++  bool
++  describe_state_change (pretty_printer &pp,
++			 const evdesc::state_change &change) override
+   {
+     if (change.m_old_state == m_sm.get_start_state ())
+       {
+ 	if (change.m_new_state == m_sm.m_unchecked_read_write
+ 	    || change.m_new_state == m_sm.m_valid_read_write)
+-	  return change.formatted_print ("opened here as read-write");
++	  {
++	    pp_string (&pp, "opened here as read-write");
++	    return true;
++	  }
+ 
+ 	if (change.m_new_state == m_sm.m_unchecked_read_only
+ 	    || change.m_new_state == m_sm.m_valid_read_only)
+-	  return change.formatted_print ("opened here as read-only");
++	  {
++	    pp_string (&pp, "opened here as read-only");
++	    return true;
++	  }
+ 
+ 	if (change.m_new_state == m_sm.m_unchecked_write_only
+ 	    || change.m_new_state == m_sm.m_valid_write_only)
+-	  return change.formatted_print ("opened here as write-only");
++	  {
++	    pp_string (&pp, "opened here as write-only");
++	    return true;
++	  }
+ 
+ 	if (change.m_new_state == m_sm.m_new_datagram_socket)
+-	  return change.formatted_print ("datagram socket created here");
++	  {
++	    pp_string (&pp, "datagram socket created here");
++	    return true;
++	  }
+ 
+ 	if (change.m_new_state == m_sm.m_new_stream_socket)
+-	  return change.formatted_print ("stream socket created here");
++	  {
++	    pp_string (&pp, "stream socket created here");
++	    return true;
++	  }
+ 
+ 	if (change.m_new_state == m_sm.m_new_unknown_socket
+ 	    || change.m_new_state == m_sm.m_connected_stream_socket)
+-	  return change.formatted_print ("socket created here");
++	  {
++	    pp_string (&pp, "socket created here");
++	    return true;
++	  }
+       }
+ 
+     if (change.m_new_state == m_sm.m_bound_datagram_socket)
+-      return change.formatted_print ("datagram socket bound here");
++      {
++	pp_string (&pp, "datagram socket bound here");
++	return true;
++      }
+ 
+     if (change.m_new_state == m_sm.m_bound_stream_socket)
+-      return change.formatted_print ("stream socket bound here");
++      {
++	pp_string (&pp, "stream socket bound here");
++	return true;
++      }
+ 
+     if (change.m_new_state == m_sm.m_bound_unknown_socket
+ 	|| change.m_new_state == m_sm.m_connected_stream_socket)
+-	  return change.formatted_print ("socket bound here");
++      {
++	pp_string (&pp, "socket bound here");
++	return true;
++      }
+ 
+     if (change.m_new_state == m_sm.m_listening_stream_socket)
+-      return change.formatted_print
+-	("stream socket marked as passive here via %qs", "listen");
++      {
++	pp_printf (&pp,
++		   "stream socket marked as passive here via %qs",
++		   "listen");
++	return true;
++      }
+ 
+     if (change.m_new_state == m_sm.m_closed)
+-      return change.formatted_print ("closed here");
++      {
++	pp_string (&pp, "closed here");
++	return true;
++      }
+ 
+     if (m_sm.is_unchecked_fd_p (change.m_old_state)
+ 	&& m_sm.is_valid_fd_p (change.m_new_state))
+       {
+ 	if (change.m_expr)
+-	  return change.formatted_print (
+-	      "assuming %qE is a valid file descriptor (>= 0)", change.m_expr);
++	  pp_printf (&pp,
++		     "assuming %qE is a valid file descriptor (>= 0)",
++		     change.m_expr);
+ 	else
+-	  return change.formatted_print ("assuming a valid file descriptor");
++	  pp_string (&pp, "assuming a valid file descriptor");
++	return true;
+       }
+ 
+     if (m_sm.is_unchecked_fd_p (change.m_old_state)
+ 	&& change.m_new_state == m_sm.m_invalid)
+       {
+ 	if (change.m_expr)
+-	  return change.formatted_print (
+-	      "assuming %qE is an invalid file descriptor (< 0)",
+-	      change.m_expr);
++	  pp_printf (&pp,
++		     "assuming %qE is an invalid file descriptor (< 0)",
++		     change.m_expr);
+ 	else
+-	  return change.formatted_print ("assuming an invalid file descriptor");
++	  pp_string (&pp, "assuming an invalid file descriptor");
++	return true;
+       }
+ 
+-    return label_text ();
++    return false;
+   }
+ 
+   diagnostic_event::meaning
+@@ -477,37 +516,43 @@ public:
+       return ctxt.warn ("leak of file descriptor");
+   }
+ 
+-  label_text
+-  describe_state_change (const evdesc::state_change &change) final override
++  bool
++  describe_state_change (pretty_printer &pp,
++			 const evdesc::state_change &change) final override
+   {
+     if (m_sm.is_unchecked_fd_p (change.m_new_state))
+       {
+ 	m_open_event = change.m_event_id;
+-	return label_text::borrow ("opened here");
++	pp_string (&pp, "opened here");
++	return true;
+       }
+ 
+-    return fd_diagnostic::describe_state_change (change);
++    return fd_diagnostic::describe_state_change (pp, change);
+   }
+ 
+-  label_text
+-  describe_final_event (const evdesc::final_event &ev) final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &ev) final override
+   {
+     if (m_open_event.known_p ())
+       {
+ 	if (ev.m_expr)
+-	  return ev.formatted_print ("%qE leaks here; was opened at %@",
+-				     ev.m_expr, &m_open_event);
++	  pp_printf (&pp,
++		     "%qE leaks here; was opened at %@",
++		     ev.m_expr, &m_open_event);
+ 	else
+-	  return ev.formatted_print ("leaks here; was opened at %@",
+-				     &m_open_event);
++	  pp_printf (&pp,
++		     "leaks here; was opened at %@",
++		     &m_open_event);
+       }
+     else
+       {
+ 	if (ev.m_expr)
+-	  return ev.formatted_print ("%qE leaks here", ev.m_expr);
++	  pp_printf (&pp, "%qE leaks here", ev.m_expr);
+ 	else
+-	  return ev.formatted_print ("leaks here");
++	  pp_string (&pp, "leaks here");
+       }
++    return true;
+   }
+ 
+ private:
+@@ -568,17 +613,22 @@ public:
+       return warned;
+   }
+ 
+-  label_text
+-  describe_final_event (const evdesc::final_event &ev) final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &) final override
+   {
+     switch (m_fd_dir)
+       {
+       case DIRS_READ:
+-	return ev.formatted_print ("%qE on read-only file descriptor %qE",
+-				   m_callee_fndecl, m_arg);
++	pp_printf (&pp,
++		   "%qE on read-only file descriptor %qE",
++		   m_callee_fndecl, m_arg);
++	return true;
+       case DIRS_WRITE:
+-	return ev.formatted_print ("%qE on write-only file descriptor %qE",
+-				   m_callee_fndecl, m_arg);
++	pp_printf (&pp,
++		   "%qE on write-only file descriptor %qE",
++		   m_callee_fndecl, m_arg);
++	return true;
+       default:
+ 	gcc_unreachable ();
+       }
+@@ -614,27 +664,38 @@ public:
+     return ctxt.warn ("double %<close%> of file descriptor %qE", m_arg);
+   }
+ 
+-  label_text
+-  describe_state_change (const evdesc::state_change &change) override
++  bool
++  describe_state_change (pretty_printer &pp,
++			 const evdesc::state_change &change) override
+   {
+     if (m_sm.is_unchecked_fd_p (change.m_new_state))
+-      return label_text::borrow ("opened here");
++      {
++	pp_string (&pp, "opened here");
++	return true;
++      }
+ 
+     if (change.m_new_state == m_sm.m_closed)
+       {
+ 	m_first_close_event = change.m_event_id;
+-	return change.formatted_print ("first %qs here", "close");
++	pp_printf (&pp, "first %qs here", "close");
++	return true;
+       }
+-    return fd_diagnostic::describe_state_change (change);
++    return fd_diagnostic::describe_state_change (pp, change);
+   }
+ 
+-  label_text
+-  describe_final_event (const evdesc::final_event &ev) final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &) final override
+   {
+     if (m_first_close_event.known_p ())
+-      return ev.formatted_print ("second %qs here; first %qs was at %@",
+-				 "close", "close", &m_first_close_event);
+-    return ev.formatted_print ("second %qs here", "close");
++      pp_printf (&pp,
++		 "second %qs here; first %qs was at %@",
++		 "close", "close", &m_first_close_event);
++    else
++      pp_printf (&pp,
++		 "second %qs here",
++		 "close");
++    return true;
+   }
+ 
+ private:
+@@ -679,31 +740,41 @@ public:
+     return warned;
+   }
+ 
+-  label_text
+-  describe_state_change (const evdesc::state_change &change) override
++  bool
++  describe_state_change (pretty_printer &pp,
++			 const evdesc::state_change &change) override
+   {
+     if (m_sm.is_unchecked_fd_p (change.m_new_state))
+-      return label_text::borrow ("opened here");
++      {
++	pp_string (&pp, "opened here");
++	return true;
++      }
+ 
+     if (change.m_new_state == m_sm.m_closed)
+       {
+ 	m_first_close_event = change.m_event_id;
+-	return change.formatted_print ("closed here");
++	pp_string (&pp, "closed here");
++	return true;
+       }
+ 
+-    return fd_diagnostic::describe_state_change (change);
++    return fd_diagnostic::describe_state_change (pp, change);
+   }
+ 
+-  label_text
+-  describe_final_event (const evdesc::final_event &ev) final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &) final override
+   {
+     if (m_first_close_event.known_p ())
+-	return ev.formatted_print (
+-	    "%qE on closed file descriptor %qE; %qs was at %@", m_callee_fndecl,
+-	    m_arg, "close", &m_first_close_event);
+-      else
+-	return ev.formatted_print ("%qE on closed file descriptor %qE",
+-				  m_callee_fndecl, m_arg);
++      pp_printf (&pp,
++		 "%qE on closed file descriptor %qE;"
++		 " %qs was at %@",
++		 m_callee_fndecl, m_arg,
++		 "close", &m_first_close_event);
++    else
++      pp_printf (&pp,
++		 "%qE on closed file descriptor %qE",
++		 m_callee_fndecl, m_arg);
++    return true;
+   }
+ 
+ private:
+@@ -748,27 +819,32 @@ public:
+     return warned;
+   }
+ 
+-  label_text
+-  describe_state_change (const evdesc::state_change &change) override
++  bool
++  describe_state_change (pretty_printer &pp,
++			 const evdesc::state_change &change) override
+   {
+     if (m_sm.is_unchecked_fd_p (change.m_new_state))
+       {
+ 	m_first_open_event = change.m_event_id;
+-	return label_text::borrow ("opened here");
++	pp_string (&pp, "opened here");
++	return true;
+       }
+ 
+-    return fd_diagnostic::describe_state_change (change);
++    return fd_diagnostic::describe_state_change (pp, change);
+   }
+ 
+-  label_text
+-  describe_final_event (const evdesc::final_event &ev) final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &) final override
+   {
+     if (m_first_open_event.known_p ())
+-      return ev.formatted_print (
+-	  "%qE could be invalid: unchecked value from %@", m_arg,
+-	  &m_first_open_event);
++      pp_printf (&pp,
++		 "%qE could be invalid: unchecked value from %@", m_arg,
++		 &m_first_open_event);
+     else
+-      return ev.formatted_print ("%qE could be invalid", m_arg);
++      pp_printf (&pp,
++		 "%qE could be invalid", m_arg);
++    return true;
+   }
+ 
+ private:
+@@ -856,29 +932,39 @@ public:
+ 		      m_callee_fndecl, m_arg);
+   }
+ 
+-  label_text
+-  describe_final_event (const evdesc::final_event &ev) final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &) final override
+   {
+     switch (m_expected_phase)
+       {
+       case EXPECTED_PHASE_CAN_TRANSFER:
+ 	{
+ 	  if (m_actual_state == m_sm.m_new_stream_socket)
+-	    return ev.formatted_print
+-	      ("%qE expects a stream socket to be connected via %qs"
+-	       " but %qE has not yet been bound",
+-	       m_callee_fndecl, "accept", m_arg);
++	    {
++	      pp_printf (&pp,
++			 "%qE expects a stream socket to be connected via %qs"
++			 " but %qE has not yet been bound",
++			 m_callee_fndecl, "accept", m_arg);
++	      return true;
++	    }
+ 	  if (m_actual_state == m_sm.m_bound_stream_socket)
+-	    return ev.formatted_print
+-	      ("%qE expects a stream socket to be connected via %qs"
+-	       " but %qE is not yet listening",
+-	       m_callee_fndecl, "accept", m_arg);
++	    {
++	      pp_printf (&pp,
++			 "%qE expects a stream socket to be connected via %qs"
++			 " but %qE is not yet listening",
++			 m_callee_fndecl, "accept", m_arg);
++	      return true;
++	    }
+ 	  if (m_actual_state == m_sm.m_listening_stream_socket)
+-	    return ev.formatted_print
+-	      ("%qE expects a stream socket to be connected via"
+-	       " the return value of %qs"
+-	       " but %qE is listening; wrong file descriptor?",
+-	       m_callee_fndecl, "accept", m_arg);
++	    {
++	      pp_printf (&pp,
++			 "%qE expects a stream socket to be connected via"
++			 " the return value of %qs"
++			 " but %qE is listening; wrong file descriptor?",
++			 m_callee_fndecl, "accept", m_arg);
++	      return true;
++	    }
+ 	}
+ 	break;
+       case EXPECTED_PHASE_CAN_BIND:
+@@ -886,56 +972,80 @@ public:
+ 	  if (m_actual_state == m_sm.m_bound_datagram_socket
+ 	      || m_actual_state == m_sm.m_bound_stream_socket
+ 	      || m_actual_state == m_sm.m_bound_unknown_socket)
+-	    return ev.formatted_print
+-	      ("%qE expects a new socket file descriptor"
+-	       " but %qE has already been bound",
+-	       m_callee_fndecl, m_arg);
++	    {
++	      pp_printf (&pp,
++			 "%qE expects a new socket file descriptor"
++			 " but %qE has already been bound",
++			 m_callee_fndecl, m_arg);
++	      return true;
++	    }
+ 	  if (m_actual_state == m_sm.m_connected_stream_socket)
+-	    return ev.formatted_print
+-	      ("%qE expects a new socket file descriptor"
+-	       " but %qE is already connected",
+-	       m_callee_fndecl, m_arg);
++	    {
++	      pp_printf (&pp,
++			 "%qE expects a new socket file descriptor"
++			 " but %qE is already connected",
++			 m_callee_fndecl, m_arg);
++	      return true;
++	    }
+ 	  if (m_actual_state == m_sm.m_listening_stream_socket)
+-	    return ev.formatted_print
+-	      ("%qE expects a new socket file descriptor"
+-	       " but %qE is already listening",
+-	       m_callee_fndecl, m_arg);
++	    {
++	      pp_printf (&pp,
++			 "%qE expects a new socket file descriptor"
++			 " but %qE is already listening",
++			 m_callee_fndecl, m_arg);
++	      return true;
++	    }
+ 	}
+ 	break;
+       case EXPECTED_PHASE_CAN_LISTEN:
+ 	{
+ 	  if (m_actual_state == m_sm.m_new_stream_socket
+ 	      || m_actual_state == m_sm.m_new_unknown_socket)
+-	    return ev.formatted_print
+-	      ("%qE expects a bound stream socket file descriptor"
+-	       " but %qE has not yet been bound",
+-	       m_callee_fndecl, m_arg);
++	    {
++	      pp_printf (&pp,
++			 "%qE expects a bound stream socket file descriptor"
++			 " but %qE has not yet been bound",
++			 m_callee_fndecl, m_arg);
++	      return true;
++	    }
+ 	  if (m_actual_state == m_sm.m_connected_stream_socket)
+-	    return ev.formatted_print
+-	      ("%qE expects a bound stream socket file descriptor"
+-	       " but %qE is connected",
+-	       m_callee_fndecl, m_arg);
++	    {
++	      pp_printf (&pp,
++			 "%qE expects a bound stream socket file descriptor"
++			 " but %qE is connected",
++			 m_callee_fndecl, m_arg);
++	      return true;
++	    }
+ 	}
+ 	break;
+       case EXPECTED_PHASE_CAN_ACCEPT:
+ 	{
+ 	  if (m_actual_state == m_sm.m_new_stream_socket
+ 	      || m_actual_state == m_sm.m_new_unknown_socket)
+-	    return ev.formatted_print
+-	      ("%qE expects a listening stream socket file descriptor"
+-	       " but %qE has not yet been bound",
+-	       m_callee_fndecl, m_arg);
++	    {
++	      pp_printf (&pp,
++			 "%qE expects a listening stream socket file descriptor"
++			 " but %qE has not yet been bound",
++			 m_callee_fndecl, m_arg);
++	      return true;
++	    }
+ 	  if (m_actual_state == m_sm.m_bound_stream_socket
+ 	      || m_actual_state == m_sm.m_bound_unknown_socket)
+-	    return ev.formatted_print
+-	      ("%qE expects a listening stream socket file descriptor"
+-	       " whereas %qE is bound but not yet listening",
+-	       m_callee_fndecl, m_arg);
++	    {
++	      pp_printf (&pp,
++			 "%qE expects a listening stream socket file descriptor"
++			 " whereas %qE is bound but not yet listening",
++			 m_callee_fndecl, m_arg);
++	      return true;
++	    }
+ 	  if (m_actual_state == m_sm.m_connected_stream_socket)
+-	    return ev.formatted_print
+-	      ("%qE expects a listening stream socket file descriptor"
+-	       " but %qE is connected",
+-	       m_callee_fndecl, m_arg);
++	    {
++	      pp_printf (&pp,
++			 "%qE expects a listening stream socket file descriptor"
++			 " but %qE is connected",
++			 m_callee_fndecl, m_arg);
++	      return true;
++	    }
+ 	}
+ 	break;
+       case EXPECTED_PHASE_CAN_CONNECT:
+@@ -943,12 +1053,20 @@ public:
+ 	  if (m_actual_state == m_sm.m_bound_datagram_socket
+ 	      || m_actual_state == m_sm.m_bound_stream_socket
+ 	      || m_actual_state == m_sm.m_bound_unknown_socket)
+-	    return ev.formatted_print
+-	      ("%qE expects a new socket file descriptor but %qE is bound",
+-	       m_callee_fndecl, m_arg);
++	    {
++	      pp_printf (&pp,
++			 "%qE expects a new socket file descriptor"
++			 " but %qE is bound",
++			 m_callee_fndecl, m_arg);
++	      return true;
++	    }
+ 	  else
+-	    return ev.formatted_print
+-	      ("%qE expects a new socket file descriptor", m_callee_fndecl);
++	    {
++	      pp_printf (&pp,
++			 "%qE expects a new socket file descriptor",
++			 m_callee_fndecl);
++	      return true;
++	    }
+ 	}
+ 	break;
+       }
+@@ -1025,8 +1143,9 @@ public:
+       }
+   }
+ 
+-  label_text
+-  describe_final_event (const evdesc::final_event &ev) final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &) final override
+   {
+     switch (m_expected_type)
+       {
+@@ -1036,16 +1155,21 @@ public:
+       case EXPECTED_TYPE_SOCKET:
+       case EXPECTED_TYPE_STREAM_SOCKET:
+ 	if (!m_sm.is_socket_fd_p (m_actual_state))
+-	  return ev.formatted_print ("%qE expects a socket file descriptor"
+-				     " but %qE is not a socket",
+-				     m_callee_fndecl, m_arg);
++	  {
++	    pp_printf (&pp,
++		       "%qE expects a socket file descriptor"
++		       " but %qE is not a socket",
++		       m_callee_fndecl, m_arg);
++	    return true;
++	  }
+       }
+     gcc_assert (m_expected_type == EXPECTED_TYPE_STREAM_SOCKET);
+     gcc_assert (m_sm.is_datagram_socket_fd_p (m_actual_state));
+-    return ev.formatted_print
+-      ("%qE expects a stream socket file descriptor"
+-       " but %qE is a datagram socket",
+-       m_callee_fndecl, m_arg);
++    pp_printf (&pp,
++	       "%qE expects a stream socket file descriptor"
++	       " but %qE is a datagram socket",
++	       m_callee_fndecl, m_arg);
++    return true;
+   }
+ 
+ private:
+diff --git a/gcc/analyzer/sm-file.cc b/gcc/analyzer/sm-file.cc
+index 98ca4e4c9eb4..d6e7e6b25e76 100644
+--- a/gcc/analyzer/sm-file.cc
++++ b/gcc/analyzer/sm-file.cc
+@@ -29,6 +29,7 @@ along with GCC; see the file COPYING3.  If not see
+ #include "basic-block.h"
+ #include "gimple.h"
+ #include "options.h"
++#include "diagnostic-core.h"
+ #include "diagnostic-path.h"
+ #include "analyzer/analyzer.h"
+ #include "diagnostic-event-id.h"
+@@ -116,31 +117,48 @@ public:
+     return same_tree_p (m_arg, ((const file_diagnostic &)base_other).m_arg);
+   }
+ 
+-  label_text describe_state_change (const evdesc::state_change &change)
+-    override
++  bool
++  describe_state_change (pretty_printer &pp,
++			 const evdesc::state_change &change) override
+   {
+     if (change.m_old_state == m_sm.get_start_state ()
+ 	&& change.m_new_state == m_sm.m_unchecked)
+       // TODO: verify that it's the fopen stmt, not a copy
+-      return label_text::borrow ("opened here");
++      {
++	pp_string (&pp, "opened here");
++	return true;
++      }
+     if (change.m_old_state == m_sm.m_unchecked
+ 	&& change.m_new_state == m_sm.m_nonnull)
+       {
+ 	if (change.m_expr)
+-	  return change.formatted_print ("assuming %qE is non-NULL",
+-					 change.m_expr);
++	  {
++	    pp_printf (&pp,
++		       "assuming %qE is non-NULL",
++		       change.m_expr);
++	    return true;
++	  }
+ 	else
+-	  return change.formatted_print ("assuming FILE * is non-NULL");
++	  {
++	    pp_printf (&pp, "assuming FILE * is non-NULL");
++	    return true;
++	  }
+       }
+     if (change.m_new_state == m_sm.m_null)
+       {
+ 	if (change.m_expr)
+-	  return change.formatted_print ("assuming %qE is NULL",
+-					 change.m_expr);
++	  {
++	    pp_printf (&pp, "assuming %qE is NULL",
++		       change.m_expr);
++	    return true;
++	  }
+ 	else
+-	  return change.formatted_print ("assuming FILE * is NULL");
++	  {
++	    pp_printf (&pp, "assuming FILE * is NULL");
++	    return true;
++	  }
+       }
+-    return label_text ();
++    return false;
+   }
+ 
+   diagnostic_event::meaning
+@@ -184,24 +202,32 @@ public:
+ 		      m_arg);
+   }
+ 
+-  label_text describe_state_change (const evdesc::state_change &change)
+-    override
++  bool
++  describe_state_change (pretty_printer &pp,
++			 const evdesc::state_change &change) override
+   {
+     if (change.m_new_state == m_sm.m_closed)
+       {
+ 	m_first_fclose_event = change.m_event_id;
+-	return change.formatted_print ("first %qs here", "fclose");
++	pp_printf (&pp, "first %qs here", "fclose");
++	return true;
+       }
+-    return file_diagnostic::describe_state_change (change);
++    return file_diagnostic::describe_state_change (pp, change);
+   }
+ 
+-  label_text describe_final_event (const evdesc::final_event &ev) final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &) final override
+   {
+     if (m_first_fclose_event.known_p ())
+-      return ev.formatted_print ("second %qs here; first %qs was at %@",
+-				 "fclose", "fclose",
+-				 &m_first_fclose_event);
+-    return ev.formatted_print ("second %qs here", "fclose");
++      pp_printf (&pp,
++		 "second %qs here; first %qs was at %@",
++		 "fclose", "fclose",
++		 &m_first_fclose_event);
++    else
++      pp_printf (&pp,
++		 "second %qs here", "fclose");
++    return true;
+   }
+ 
+ private:
+@@ -233,35 +259,42 @@ public:
+       return ctxt.warn ("leak of FILE");
+   }
+ 
+-  label_text describe_state_change (const evdesc::state_change &change)
+-    final override
++  bool
++  describe_state_change (pretty_printer &pp,
++			 const evdesc::state_change &change) final override
+   {
+     if (change.m_new_state == m_sm.m_unchecked)
+       {
+ 	m_fopen_event = change.m_event_id;
+-	return label_text::borrow ("opened here");
++	pp_string (&pp, "opened here");
++	return true;
+       }
+-    return file_diagnostic::describe_state_change (change);
++    return file_diagnostic::describe_state_change (pp, change);
+   }
+ 
+-  label_text describe_final_event (const evdesc::final_event &ev) final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &ev) final override
+   {
+     if (m_fopen_event.known_p ())
+       {
+ 	if (ev.m_expr)
+-	  return ev.formatted_print ("%qE leaks here; was opened at %@",
+-				     ev.m_expr, &m_fopen_event);
++	  pp_printf (&pp,
++		     "%qE leaks here; was opened at %@",
++		     ev.m_expr, &m_fopen_event);
+ 	else
+-	  return ev.formatted_print ("leaks here; was opened at %@",
+-				     &m_fopen_event);
++	  pp_printf (&pp,
++		     "leaks here; was opened at %@",
++		     &m_fopen_event);
+       }
+     else
+       {
+ 	if (ev.m_expr)
+-	  return ev.formatted_print ("%qE leaks here", ev.m_expr);
++	  pp_printf (&pp, "%qE leaks here", ev.m_expr);
+ 	else
+-	  return ev.formatted_print ("leaks here");
++	  pp_printf (&pp, "leaks here");
+       }
++    return true;
+   }
+ 
+ private:
+diff --git a/gcc/analyzer/sm-malloc.cc b/gcc/analyzer/sm-malloc.cc
+index 12465cbe42b2..957c0d055e61 100644
+--- a/gcc/analyzer/sm-malloc.cc
++++ b/gcc/analyzer/sm-malloc.cc
+@@ -754,46 +754,53 @@ public:
+     return same_tree_p (m_arg, ((const malloc_diagnostic &)base_other).m_arg);
+   }
+ 
+-  label_text describe_state_change (const evdesc::state_change &change)
+-    override
++  bool
++  describe_state_change (pretty_printer &pp,
++			 const evdesc::state_change &change) override
+   {
+     if (change.m_old_state == m_sm.get_start_state ()
+ 	&& (unchecked_p (change.m_new_state) || nonnull_p (change.m_new_state)))
+       // TODO: verify that it's the allocation stmt, not a copy
+-      return label_text::borrow ("allocated here");
++      {
++	pp_string (&pp, "allocated here");
++	return true;
++      }
+     if (unchecked_p (change.m_old_state)
+ 	&& nonnull_p (change.m_new_state))
+       {
+ 	if (change.m_expr)
+-	  return change.formatted_print ("assuming %qE is non-NULL",
+-					 change.m_expr);
++	  pp_printf (&pp, "assuming %qE is non-NULL",
++		     change.m_expr);
+ 	else
+-	  return change.formatted_print ("assuming %qs is non-NULL",
+-					 "<unknown>");
++	  pp_printf (&pp, "assuming %qs is non-NULL",
++		     "<unknown>");
++	return true;
+       }
+     if (change.m_new_state == m_sm.m_null)
+       {
+ 	if (unchecked_p (change.m_old_state))
+ 	  {
+ 	    if (change.m_expr)
+-	      return change.formatted_print ("assuming %qE is NULL",
+-					     change.m_expr);
++	      pp_printf (&pp, "assuming %qE is NULL",
++			 change.m_expr);
+ 	    else
+-	      return change.formatted_print ("assuming %qs is NULL",
+-					     "<unknown>");
++	      pp_printf (&pp, "assuming %qs is NULL",
++			 "<unknown>");
++	    return true;
+ 	  }
+ 	else
+ 	  {
+ 	    if (change.m_expr)
+-	      return change.formatted_print ("%qE is NULL",
+-					     change.m_expr);
++	      pp_printf (&pp, "%qE is NULL",
++			 change.m_expr);
+ 	    else
+-	      return change.formatted_print ("%qs is NULL",
+-					     "<unknown>");
++	      pp_printf (&pp, "%qs is NULL",
++			 "<unknown>");
++	    return true;
+ 	  }
+       }
+ 
+-    return label_text ();
++    return false;
+   }
+ 
+   diagnostic_event::meaning
+@@ -855,42 +862,48 @@ public:
+ 			m_actual_dealloc->m_name, m_arg);
+   }
+ 
+-  label_text describe_state_change (const evdesc::state_change &change)
+-    final override
++  bool
++  describe_state_change (pretty_printer &pp,
++			 const evdesc::state_change &change) final override
+   {
+     if (unchecked_p (change.m_new_state))
+       {
+ 	m_alloc_event = change.m_event_id;
+ 	if (const deallocator *expected_dealloc
+ 	    = m_expected_deallocators->maybe_get_single ())
+-	  return change.formatted_print ("allocated here"
+-					 " (expects deallocation with %qs)",
+-					 expected_dealloc->m_name);
++	  pp_printf (&pp,
++		     "allocated here (expects deallocation with %qs)",
++		     expected_dealloc->m_name);
+ 	else
+-	  return change.formatted_print ("allocated here");
++	  pp_string (&pp, "allocated here");
++	return true;
+       }
+-    return malloc_diagnostic::describe_state_change (change);
++    return malloc_diagnostic::describe_state_change (pp, change);
+   }
+ 
+-  label_text describe_final_event (const evdesc::final_event &ev) final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &) final override
+   {
+     if (m_alloc_event.known_p ())
+       {
+ 	if (const deallocator *expected_dealloc
+ 	    = m_expected_deallocators->maybe_get_single ())
+-	  return ev.formatted_print
+-	    ("deallocated with %qs here;"
+-	     " allocation at %@ expects deallocation with %qs",
+-	     m_actual_dealloc->m_name, &m_alloc_event,
+-	     expected_dealloc->m_name);
++	  pp_printf (&pp,
++		     "deallocated with %qs here;"
++		     " allocation at %@ expects deallocation with %qs",
++		     m_actual_dealloc->m_name, &m_alloc_event,
++		     expected_dealloc->m_name);
+ 	else
+-	  return ev.formatted_print
+-	    ("deallocated with %qs here;"
+-	     " allocated at %@",
+-	     m_actual_dealloc->m_name, &m_alloc_event);
++	  pp_printf (&pp,
++		     "deallocated with %qs here;"
++		     " allocated at %@",
++		     m_actual_dealloc->m_name, &m_alloc_event);
++	return true;
+       }
+-    return ev.formatted_print ("deallocated with %qs here",
+-			       m_actual_dealloc->m_name);
++    pp_printf (&pp, "deallocated with %qs here",
++	       m_actual_dealloc->m_name);
++    return true;
+   }
+ 
+ private:
+@@ -922,34 +935,45 @@ public:
+     return ctxt.warn ("double-%qs of %qE", m_funcname, m_arg);
+   }
+ 
+-  label_text describe_state_change (const evdesc::state_change &change)
+-    final override
++  bool
++  describe_state_change (pretty_printer &pp,
++			 const evdesc::state_change &change) final override
+   {
+     if (freed_p (change.m_new_state))
+       {
+ 	m_first_free_event = change.m_event_id;
+-	return change.formatted_print ("first %qs here", m_funcname);
++	pp_printf (&pp, "first %qs here", m_funcname);
++	return true;
+       }
+-    return malloc_diagnostic::describe_state_change (change);
++    return malloc_diagnostic::describe_state_change (pp, change);
+   }
+ 
+-  label_text describe_call_with_state (const evdesc::call_with_state &info)
+-    final override
++  bool
++  describe_call_with_state (pretty_printer &pp,
++			    const evdesc::call_with_state &info) final override
+   {
+     if (freed_p (info.m_state))
+-      return info.formatted_print
+-	("passing freed pointer %qE in call to %qE from %qE",
+-	 info.m_expr, info.m_callee_fndecl, info.m_caller_fndecl);
+-    return label_text ();
++      {
++	pp_printf (&pp,
++		   "passing freed pointer %qE in call to %qE from %qE",
++		   info.m_expr, info.m_callee_fndecl, info.m_caller_fndecl);
++	return true;
++      }
++    return false;
+   }
+ 
+-  label_text describe_final_event (const evdesc::final_event &ev) final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &) final override
+   {
+     if (m_first_free_event.known_p ())
+-      return ev.formatted_print ("second %qs here; first %qs was at %@",
+-				 m_funcname, m_funcname,
+-				 &m_first_free_event);
+-    return ev.formatted_print ("second %qs here", m_funcname);
++      pp_printf (&pp,
++		 "second %qs here; first %qs was at %@",
++		 m_funcname, m_funcname,
++		 &m_first_free_event);
++    else
++      pp_printf (&pp, "second %qs here", m_funcname);
++    return true;
+   }
+ 
+ private:
+@@ -967,25 +991,32 @@ public:
+   : malloc_diagnostic (sm, arg)
+   {}
+ 
+-  label_text describe_state_change (const evdesc::state_change &change)
+-    final override
++  bool
++  describe_state_change (pretty_printer &pp,
++			 const evdesc::state_change &change) final override
+   {
+     if (change.m_old_state == m_sm.get_start_state ()
+ 	&& unchecked_p (change.m_new_state))
+       {
+ 	m_origin_of_unchecked_event = change.m_event_id;
+-	return label_text::borrow ("this call could return NULL");
++	pp_string (&pp, "this call could return NULL");
++	return true;
+       }
+-    return malloc_diagnostic::describe_state_change (change);
++    return malloc_diagnostic::describe_state_change (pp, change);
+   }
+ 
+-  label_text describe_return_of_state (const evdesc::return_of_state &info)
+-    final override
++  bool
++  describe_return_of_state (pretty_printer &pp,
++			    const evdesc::return_of_state &info) final override
+   {
+     if (unchecked_p (info.m_state))
+-      return info.formatted_print ("possible return of NULL to %qE from %qE",
+-				   info.m_caller_fndecl, info.m_callee_fndecl);
+-    return label_text ();
++      {
++	pp_printf (&pp,
++		   "possible return of NULL to %qE from %qE",
++		   info.m_caller_fndecl, info.m_callee_fndecl);
++	return true;
++      }
++    return false;
+   }
+ 
+ protected:
+@@ -1016,14 +1047,18 @@ public:
+     return ctxt.warn ("dereference of possibly-NULL %qE", m_arg);
+   }
+ 
+-  label_text describe_final_event (const evdesc::final_event &ev) final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &ev) final override
+   {
+     if (m_origin_of_unchecked_event.known_p ())
+-      return ev.formatted_print ("%qE could be NULL: unchecked value from %@",
+-				 ev.m_expr,
+-				 &m_origin_of_unchecked_event);
++      pp_printf (&pp,
++		 "%qE could be NULL: unchecked value from %@",
++		 ev.m_expr,
++		 &m_origin_of_unchecked_event);
+     else
+-      return ev.formatted_print ("%qE could be NULL", ev.m_expr);
++      pp_printf (&pp,"%qE could be NULL", ev.m_expr);
++    return true;
+   }
+ 
+ };
+@@ -1109,20 +1144,22 @@ public:
+     return warned;
+   }
+ 
+-  label_text describe_final_event (const evdesc::final_event &ev) final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &ev) final override
+   {
+     label_text arg_desc = describe_argument_index (m_fndecl, m_arg_idx);
+-    label_text result;
+     if (m_origin_of_unchecked_event.known_p ())
+-      result = ev.formatted_print ("argument %s (%qE) from %@ could be NULL"
+-				   " where non-null expected",
+-				   arg_desc.get (), ev.m_expr,
+-				   &m_origin_of_unchecked_event);
++      pp_printf (&pp,"argument %s (%qE) from %@ could be NULL"
++		 " where non-null expected",
++		 arg_desc.get (), ev.m_expr,
++		 &m_origin_of_unchecked_event);
+     else
+-      result = ev.formatted_print ("argument %s (%qE) could be NULL"
+-				   " where non-null expected",
+-				   arg_desc.get (), ev.m_expr);
+-    return result;
++      pp_printf (&pp,
++		 "argument %s (%qE) could be NULL"
++		 " where non-null expected",
++		 arg_desc.get (), ev.m_expr);
++    return true;
+   }
+ 
+ private:
+@@ -1154,18 +1191,26 @@ public:
+     return ctxt.warn ("dereference of NULL %qE", m_arg);
+   }
+ 
+-  label_text describe_return_of_state (const evdesc::return_of_state &info)
++  bool
++  describe_return_of_state (pretty_printer &pp,
++			    const evdesc::return_of_state &info)
+     final override
+   {
+     if (info.m_state == m_sm.m_null)
+-      return info.formatted_print ("return of NULL to %qE from %qE",
+-				   info.m_caller_fndecl, info.m_callee_fndecl);
+-    return label_text ();
++      {
++	pp_printf (&pp, "return of NULL to %qE from %qE",
++		   info.m_caller_fndecl, info.m_callee_fndecl);
++	return true;
++      }
++    return false;
+   }
+ 
+-  label_text describe_final_event (const evdesc::final_event &ev) final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &ev) final override
+   {
+-    return ev.formatted_print ("dereference of NULL %qE", ev.m_expr);
++    pp_printf (&pp, "dereference of NULL %qE", ev.m_expr);
++    return true;
+   }
+ 
+   /* Implementation of pending_diagnostic::supercedes_p for
+@@ -1232,18 +1277,21 @@ public:
+     return warned;
+   }
+ 
+-  label_text describe_final_event (const evdesc::final_event &ev) final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &ev) final override
+   {
+     label_text arg_desc = describe_argument_index (m_fndecl, m_arg_idx);
+-    label_text result;
+     if (zerop (ev.m_expr))
+-      result = ev.formatted_print ("argument %s NULL where non-null expected",
+-				   arg_desc.get ());
++      pp_printf (&pp,
++		 "argument %s NULL where non-null expected",
++		 arg_desc.get ());
+     else
+-      result = ev.formatted_print ("argument %s (%qE) NULL"
+-				   " where non-null expected",
+-				   arg_desc.get (), ev.m_expr);
+-    return result;
++      pp_printf (&pp,
++		 "argument %s (%qE) NULL"
++		 " where non-null expected",
++		 arg_desc.get (), ev.m_expr);
++    return true;
+   }
+ 
+ private:
+@@ -1277,8 +1325,9 @@ public:
+ 		      m_deallocator->m_name, m_arg);
+   }
+ 
+-  label_text describe_state_change (const evdesc::state_change &change)
+-    final override
++  bool
++  describe_state_change (pretty_printer &pp,
++			 const evdesc::state_change &change) final override
+   {
+     if (freed_p (change.m_new_state))
+       {
+@@ -1289,17 +1338,22 @@ public:
+ 	  case WORDING_REALLOCATED:
+ 	    gcc_unreachable ();
+ 	  case WORDING_FREED:
+-	    return label_text::borrow ("freed here");
++	    pp_string (&pp, "freed here");
++	    return true;
+ 	  case WORDING_DELETED:
+-	    return label_text::borrow ("deleted here");
++	    pp_string (&pp, "deleted here");
++	    return true;
+ 	  case WORDING_DEALLOCATED:
+-	    return label_text::borrow ("deallocated here");
++	    pp_string (&pp, "deallocated here");
++	    return true;
+ 	  }
+       }
+-    return malloc_diagnostic::describe_state_change (change);
++    return malloc_diagnostic::describe_state_change (pp, change);
+   }
+ 
+-  label_text describe_final_event (const evdesc::final_event &ev) final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &ev) final override
+   {
+     const char *funcname = m_deallocator->m_name;
+     if (m_free_event.known_p ())
+@@ -1309,19 +1363,29 @@ public:
+ 	case WORDING_REALLOCATED:
+ 	  gcc_unreachable ();
+ 	case WORDING_FREED:
+-	  return ev.formatted_print ("use after %<%s%> of %qE; freed at %@",
+-				     funcname, ev.m_expr, &m_free_event);
++	  pp_printf (&pp,
++		     "use after %<%s%> of %qE; freed at %@",
++		     funcname, ev.m_expr, &m_free_event);
++	  return true;
+ 	case WORDING_DELETED:
+-	  return ev.formatted_print ("use after %<%s%> of %qE; deleted at %@",
+-				     funcname, ev.m_expr, &m_free_event);
++	  pp_printf (&pp,
++		     "use after %<%s%> of %qE; deleted at %@",
++		     funcname, ev.m_expr, &m_free_event);
++	  return true;
+ 	case WORDING_DEALLOCATED:
+-	  return ev.formatted_print ("use after %<%s%> of %qE;"
+-				     " deallocated at %@",
+-				     funcname, ev.m_expr, &m_free_event);
++	  pp_printf (&pp,
++		     "use after %<%s%> of %qE;"
++		     " deallocated at %@",
++		     funcname, ev.m_expr, &m_free_event);
++	  return true;
+ 	}
+     else
+-      return ev.formatted_print ("use after %<%s%> of %qE",
+-				 funcname, ev.m_expr);
++      {
++	pp_printf (&pp,
++		   "use after %<%s%> of %qE",
++		   funcname, ev.m_expr);
++	return true;
++      }
+   }
+ 
+   /* Implementation of pending_diagnostic::supercedes_p for
+@@ -1371,36 +1435,45 @@ public:
+       return ctxt.warn ("leak of %qs", "<unknown>");
+   }
+ 
+-  label_text describe_state_change (const evdesc::state_change &change)
+-    final override
++  bool
++  describe_state_change (pretty_printer &pp,
++			 const evdesc::state_change &change) final override
+   {
+     if (unchecked_p (change.m_new_state)
+ 	|| (start_p (change.m_old_state) && nonnull_p (change.m_new_state)))
+       {
+ 	m_alloc_event = change.m_event_id;
+-	return label_text::borrow ("allocated here");
++	pp_string (&pp, "allocated here");
++	return true;
+       }
+-    return malloc_diagnostic::describe_state_change (change);
++    return malloc_diagnostic::describe_state_change (pp, change);
+   }
+ 
+-  label_text describe_final_event (const evdesc::final_event &ev) final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &ev) final override
+   {
+     if (ev.m_expr)
+       {
+ 	if (m_alloc_event.known_p ())
+-	  return ev.formatted_print ("%qE leaks here; was allocated at %@",
+-				     ev.m_expr, &m_alloc_event);
++	  pp_printf (&pp,
++		     "%qE leaks here; was allocated at %@",
++		     ev.m_expr, &m_alloc_event);
+ 	else
+-	  return ev.formatted_print ("%qE leaks here", ev.m_expr);
++	  pp_printf (&pp,
++		     "%qE leaks here", ev.m_expr);
+       }
+     else
+       {
+ 	if (m_alloc_event.known_p ())
+-	  return ev.formatted_print ("%qs leaks here; was allocated at %@",
+-				     "<unknown>", &m_alloc_event);
++	  pp_printf (&pp,
++		     "%qs leaks here; was allocated at %@",
++		     "<unknown>", &m_alloc_event);
+ 	else
+-	  return ev.formatted_print ("%qs leaks here", "<unknown>");
++	  pp_printf (&pp,
++		     "%qs leaks here", "<unknown>");
+       }
++    return true;
+   }
+ 
+ private:
+@@ -1457,15 +1530,20 @@ public:
+       }
+   }
+ 
+-  label_text describe_state_change (const evdesc::state_change &)
+-    final override
++  bool
++  describe_state_change (pretty_printer &pp,
++			 const evdesc::state_change &) final override
+   {
+-    return label_text::borrow ("pointer is from here");
++    pp_string (&pp, "pointer is from here");
++    return true;
+   }
+ 
+-  label_text describe_final_event (const evdesc::final_event &ev) final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &) final override
+   {
+-    return ev.formatted_print ("call to %qs here", m_funcname);
++    pp_printf (&pp, "call to %qs here", m_funcname);
++    return true;
+   }
+ 
+   void mark_interesting_stuff (interesting_t *interest) final override
+@@ -1602,8 +1680,9 @@ public:
+ 		      m_arg);
+   }
+ 
+-  label_text describe_state_change (const evdesc::state_change &change)
+-    final override
++  bool
++  describe_state_change (pretty_printer &pp,
++			 const evdesc::state_change &change) final override
+   {
+     if (change.m_old_state == m_sm.get_start_state ()
+ 	&& assumed_non_null_p (change.m_new_state))
+@@ -1611,23 +1690,30 @@ public:
+ 	m_first_deref_event = change.m_event_id;
+ 	m_deref_enode = change.m_event.get_exploded_node ();
+ 	m_deref_expr = change.m_expr;
+-	return change.formatted_print ("pointer %qE is dereferenced here",
+-				       m_arg);
++	pp_printf (&pp,
++		   "pointer %qE is dereferenced here",
++		   m_arg);
++	return true;
+       }
+-    return malloc_diagnostic::describe_state_change (change);
++    return malloc_diagnostic::describe_state_change (pp, change);
+   }
+ 
+-  label_text describe_final_event (const evdesc::final_event &ev) final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &ev) final override
+   {
+     m_check_enode = ev.m_event.get_exploded_node ();
+     if (m_first_deref_event.known_p ())
+-      return ev.formatted_print ("pointer %qE is checked for NULL here but"
+-				 " it was already dereferenced at %@",
+-				 m_arg, &m_first_deref_event);
++      pp_printf (&pp,
++		 "pointer %qE is checked for NULL here but"
++		 " it was already dereferenced at %@",
++		 m_arg, &m_first_deref_event);
+     else
+-      return ev.formatted_print ("pointer %qE is checked for NULL here but"
+-				 " it was already dereferenced",
+-				 m_arg);
++      pp_printf (&pp,
++		 "pointer %qE is checked for NULL here but"
++		 " it was already dereferenced",
++		 m_arg);
++    return true;
+   }
+ 
+ private:
+diff --git a/gcc/analyzer/sm-sensitive.cc b/gcc/analyzer/sm-sensitive.cc
+index f694e3ab0694..52cd58417b09 100644
+--- a/gcc/analyzer/sm-sensitive.cc
++++ b/gcc/analyzer/sm-sensitive.cc
+@@ -29,6 +29,7 @@ along with GCC; see the file COPYING3.  If not see
+ #include "basic-block.h"
+ #include "gimple.h"
+ #include "options.h"
++#include "diagnostic-core.h"
+ #include "diagnostic-path.h"
+ #include "analyzer/analyzer.h"
+ #include "diagnostic-event-id.h"
+@@ -102,15 +103,17 @@ public:
+ 		      m_arg);
+   }
+ 
+-  label_text describe_state_change (const evdesc::state_change &change)
+-    final override
++  bool
++  describe_state_change (pretty_printer &pp,
++			 const evdesc::state_change &change) final override
+   {
+     if (change.m_new_state == m_sm.m_sensitive)
+       {
+ 	m_first_sensitive_event = change.m_event_id;
+-	return change.formatted_print ("sensitive value acquired here");
++	pp_string (&pp, "sensitive value acquired here");
++	return true;
+       }
+-    return label_text ();
++    return false;
+   }
+ 
+   diagnostic_event::meaning
+@@ -122,34 +125,48 @@ public:
+ 					diagnostic_event::NOUN_sensitive);
+     return diagnostic_event::meaning ();
+   }
+-  label_text describe_call_with_state (const evdesc::call_with_state &info)
+-    final override
++  bool
++  describe_call_with_state (pretty_printer &pp,
++			    const evdesc::call_with_state &info) final override
+   {
+     if (info.m_state == m_sm.m_sensitive)
+-      return info.formatted_print
+-	("passing sensitive value %qE in call to %qE from %qE",
+-	 info.m_expr, info.m_callee_fndecl, info.m_caller_fndecl);
+-    return label_text ();
++      {
++	pp_printf (&pp,
++		   "passing sensitive value %qE in call to %qE from %qE",
++		   info.m_expr, info.m_callee_fndecl, info.m_caller_fndecl);
++	return true;
++      }
++    return false;
+   }
+ 
+-  label_text describe_return_of_state (const evdesc::return_of_state &info)
+-    final override
++  bool
++  describe_return_of_state (pretty_printer &pp,
++			    const evdesc::return_of_state &info) final override
+   {
+     if (info.m_state == m_sm.m_sensitive)
+-      return info.formatted_print ("returning sensitive value to %qE from %qE",
+-				   info.m_caller_fndecl, info.m_callee_fndecl);
+-    return label_text ();
++      {
++	pp_printf (&pp,
++		   "returning sensitive value to %qE from %qE",
++		   info.m_caller_fndecl, info.m_callee_fndecl);
++	return true;
++      }
++    return false;
+   }
+ 
+-  label_text describe_final_event (const evdesc::final_event &ev) final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &) final override
+   {
+     if (m_first_sensitive_event.known_p ())
+-      return ev.formatted_print ("sensitive value %qE written to output file"
+-				 "; acquired at %@",
+-				 m_arg, &m_first_sensitive_event);
++      pp_printf (&pp,
++		 "sensitive value %qE written to output file"
++		 "; acquired at %@",
++		 m_arg, &m_first_sensitive_event);
+     else
+-      return ev.formatted_print ("sensitive value %qE written to output file",
+-				 m_arg);
++      pp_printf (&pp,
++		 "sensitive value %qE written to output file",
++		 m_arg);
++    return true;
+   }
+ 
+ private:
+diff --git a/gcc/analyzer/sm-signal.cc b/gcc/analyzer/sm-signal.cc
+index ce214cba6cd3..c48dfe9c0463 100644
+--- a/gcc/analyzer/sm-signal.cc
++++ b/gcc/analyzer/sm-signal.cc
+@@ -32,6 +32,7 @@ along with GCC; see the file COPYING3.  If not see
+ #include "gimple.h"
+ #include "options.h"
+ #include "bitmap.h"
++#include "diagnostic-core.h"
+ #include "diagnostic-path.h"
+ #include "analyzer/analyzer.h"
+ #include "diagnostic-event-id.h"
+@@ -141,24 +142,31 @@ public:
+     return false;
+   }
+ 
+-  label_text describe_state_change (const evdesc::state_change &change)
+-    final override
++  bool
++  describe_state_change (pretty_printer &pp,
++			 const evdesc::state_change &change) final override
+   {
+     if (change.is_global_p ()
+ 	&& change.m_new_state == m_sm.m_in_signal_handler)
+       {
+ 	const function *handler = change.m_event.get_dest_function ();
+ 	gcc_assert (handler);
+-	return change.formatted_print ("registering %qD as signal handler",
+-				       handler->decl);
++	pp_printf (&pp,
++		   "registering %qD as signal handler",
++		   handler->decl);
++	return true;
+       }
+-    return label_text ();
++    return false;
+   }
+ 
+-  label_text describe_final_event (const evdesc::final_event &ev) final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &) final override
+   {
+-    return ev.formatted_print ("call to %qD from within signal handler",
+-			       m_unsafe_fndecl);
++    pp_printf (&pp,
++	       "call to %qD from within signal handler",
++	       m_unsafe_fndecl);
++    return true;
+   }
+ 
+ private:
+diff --git a/gcc/analyzer/sm-taint.cc b/gcc/analyzer/sm-taint.cc
+index a912e2a39d86..ecea46feddad 100644
+--- a/gcc/analyzer/sm-taint.cc
++++ b/gcc/analyzer/sm-taint.cc
+@@ -31,6 +31,7 @@ along with GCC; see the file COPYING3.  If not see
+ #include "basic-block.h"
+ #include "gimple.h"
+ #include "options.h"
++#include "diagnostic-core.h"
+ #include "diagnostic-path.h"
+ #include "analyzer/analyzer.h"
+ #include "analyzer/analyzer-logging.h"
+@@ -180,25 +181,42 @@ public:
+ 	    && m_has_bounds == other.m_has_bounds);
+   }
+ 
+-  label_text describe_state_change (const evdesc::state_change &change) override
++  bool
++  describe_state_change (pretty_printer &pp,
++			 const evdesc::state_change &change) override
+   {
+     if (change.m_new_state == m_sm.m_tainted)
+       {
+ 	if (change.m_origin)
+-	  return change.formatted_print ("%qE has an unchecked value here"
+-					 " (from %qE)",
+-					 change.m_expr, change.m_origin);
++	  {
++	    pp_printf (&pp,
++		       "%qE has an unchecked value here (from %qE)",
++		       change.m_expr, change.m_origin);
++	    return true;
++	  }
+ 	else
+-	  return change.formatted_print ("%qE gets an unchecked value here",
+-					 change.m_expr);
++	  {
++	    pp_printf (&pp,
++		       "%qE gets an unchecked value here",
++		       change.m_expr);
++	    return true;
++	  }
+       }
+     else if (change.m_new_state == m_sm.m_has_lb)
+-      return change.formatted_print ("%qE has its lower bound checked here",
+-				     change.m_expr);
++      {
++	pp_printf (&pp,
++		   "%qE has its lower bound checked here",
++		   change.m_expr);
++	return true;
++      }
+     else if (change.m_new_state == m_sm.m_has_ub)
+-      return change.formatted_print ("%qE has its upper bound checked here",
+-				     change.m_expr);
+-    return label_text ();
++      {
++	pp_printf (&pp,
++		   "%qE has its upper bound checked here",
++		   change.m_expr);
++	return true;
++      }
++    return false;
+   }
+ 
+   diagnostic_event::meaning
+@@ -293,7 +311,9 @@ public:
+ 	}
+   }
+ 
+-  label_text describe_final_event (const evdesc::final_event &ev) final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &) final override
+   {
+     if (m_arg)
+       switch (m_has_bounds)
+@@ -301,20 +321,29 @@ public:
+ 	default:
+ 	  gcc_unreachable ();
+ 	case BOUNDS_NONE:
+-	  return ev.formatted_print
+-	    ("use of attacker-controlled value %qE in array lookup"
+-	     " without bounds checking",
+-	     m_arg);
++	  {
++	    pp_printf (&pp,
++		       "use of attacker-controlled value %qE in array lookup"
++		       " without bounds checking",
++		       m_arg);
++	    return true;
++	  }
+ 	case BOUNDS_UPPER:
+-	  return ev.formatted_print
+-	    ("use of attacker-controlled value %qE"
+-	     " in array lookup without checking for negative",
+-	     m_arg);
++	  {
++	    pp_printf (&pp,
++		       "use of attacker-controlled value %qE"
++		       " in array lookup without checking for negative",
++		       m_arg);
++	    return true;
++	  }
+ 	case BOUNDS_LOWER:
+-	  return ev.formatted_print
+-	    ("use of attacker-controlled value %qE"
+-	     " in array lookup without upper-bounds checking",
+-	     m_arg);
++	  {
++	    pp_printf (&pp,
++		       "use of attacker-controlled value %qE"
++		       " in array lookup without upper-bounds checking",
++		       m_arg);
++	    return true;
++	  }
+ 	}
+     else
+       switch (m_has_bounds)
+@@ -322,17 +351,26 @@ public:
+ 	default:
+ 	  gcc_unreachable ();
+ 	case BOUNDS_NONE:
+-	  return ev.formatted_print
+-	    ("use of attacker-controlled value in array lookup"
+-	     " without bounds checking");
++	  {
++	    pp_printf (&pp,
++		       "use of attacker-controlled value in array lookup"
++		       " without bounds checking");
++	    return true;
++	  }
+ 	case BOUNDS_UPPER:
+-	  return ev.formatted_print
+-	    ("use of attacker-controlled value"
+-	     " in array lookup without checking for negative");
++	  {
++	    pp_printf (&pp,
++		       "use of attacker-controlled value"
++		       " in array lookup without checking for negative");
++	    return true;
++	  }
+ 	case BOUNDS_LOWER:
+-	  return ev.formatted_print
+-	    ("use of attacker-controlled value"
+-	     " in array lookup without upper-bounds checking");
++	  {
++	    pp_printf (&pp,
++		       "use of attacker-controlled value"
++		       " in array lookup without upper-bounds checking");
++	    return true;
++	  }
+ 	}
+   }
+ };
+@@ -402,7 +440,9 @@ public:
+ 	}
+   }
+ 
+-  label_text describe_final_event (const evdesc::final_event &ev) final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &) final override
+   {
+     if (m_arg)
+       switch (m_has_bounds)
+@@ -410,17 +450,29 @@ public:
+ 	default:
+ 	  gcc_unreachable ();
+ 	case BOUNDS_NONE:
+-	  return ev.formatted_print ("use of attacker-controlled value %qE"
+-				     " as offset without bounds checking",
+-				     m_arg);
++	  {
++	    pp_printf (&pp,
++		       "use of attacker-controlled value %qE"
++		       " as offset without bounds checking",
++		       m_arg);
++	    return true;
++	  }
+ 	case BOUNDS_UPPER:
+-	  return ev.formatted_print ("use of attacker-controlled value %qE"
+-				     " as offset without lower-bounds checking",
+-				     m_arg);
++	  {
++	    pp_printf (&pp,
++		       "use of attacker-controlled value %qE"
++		       " as offset without lower-bounds checking",
++		       m_arg);
++	    return true;
++	  }
+ 	case BOUNDS_LOWER:
+-	  return ev.formatted_print ("use of attacker-controlled value %qE"
+-				     " as offset without upper-bounds checking",
+-				     m_arg);
++	  {
++	    pp_printf (&pp,
++		       "use of attacker-controlled value %qE"
++		       " as offset without upper-bounds checking",
++		       m_arg);
++	    return true;
++	  }
+ 	}
+     else
+       switch (m_has_bounds)
+@@ -428,16 +480,28 @@ public:
+ 	default:
+ 	  gcc_unreachable ();
+ 	case BOUNDS_NONE:
+-	  return ev.formatted_print ("use of attacker-controlled value"
+-				     " as offset without bounds checking");
++	  {
++	    pp_printf (&pp,
++		       "use of attacker-controlled value"
++		       " as offset without bounds checking");
++	    return true;
++	  }
+ 	case BOUNDS_UPPER:
+-	  return ev.formatted_print ("use of attacker-controlled value"
+-				     " as offset without lower-bounds"
+-				     " checking");
++	  {
++	    pp_printf (&pp,
++		       "use of attacker-controlled value"
++		       " as offset without lower-bounds"
++		       " checking");
++	    return true;
++	  }
+ 	case BOUNDS_LOWER:
+-	  return ev.formatted_print ("use of attacker-controlled value"
+-				     " as offset without upper-bounds"
+-				     " checking");
++	  {
++	    pp_printf (&pp,
++		       "use of attacker-controlled value"
++		       " as offset without upper-bounds"
++		       " checking");
++	    return true;
++	  }
+ 	}
+   }
+ 
+@@ -518,7 +582,9 @@ public:
+ 	}
+   }
+ 
+-  label_text describe_final_event (const evdesc::final_event &ev) final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &) final override
+   {
+     if (m_arg)
+       switch (m_has_bounds)
+@@ -526,17 +592,23 @@ public:
+ 	default:
+ 	  gcc_unreachable ();
+ 	case BOUNDS_NONE:
+-	  return ev.formatted_print ("use of attacker-controlled value %qE"
+-				     " as size without bounds checking",
+-				     m_arg);
++	  pp_printf (&pp,
++		     "use of attacker-controlled value %qE"
++		     " as size without bounds checking",
++		     m_arg);
++	  return true;
+ 	case BOUNDS_UPPER:
+-	  return ev.formatted_print ("use of attacker-controlled value %qE"
+-				     " as size without lower-bounds checking",
+-				     m_arg);
++	  pp_printf (&pp,
++		     "use of attacker-controlled value %qE"
++		     " as size without lower-bounds checking",
++		     m_arg);
++	  return true;
+ 	case BOUNDS_LOWER:
+-	  return ev.formatted_print ("use of attacker-controlled value %qE"
+-				     " as size without upper-bounds checking",
+-				     m_arg);
++	  pp_printf (&pp,
++		     "use of attacker-controlled value %qE"
++		     " as size without upper-bounds checking",
++		     m_arg);
++	  return true;
+ 	}
+     else
+       switch (m_has_bounds)
+@@ -544,14 +616,20 @@ public:
+ 	default:
+ 	  gcc_unreachable ();
+ 	case BOUNDS_NONE:
+-	  return ev.formatted_print ("use of attacker-controlled value"
+-				     " as size without bounds checking");
++	  pp_printf (&pp,
++		     "use of attacker-controlled value"
++		     " as size without bounds checking");
++	  return true;
+ 	case BOUNDS_UPPER:
+-	  return ev.formatted_print ("use of attacker-controlled value"
+-				     " as size without lower-bounds checking");
++	  pp_printf (&pp,
++		     "use of attacker-controlled value"
++		     " as size without lower-bounds checking");
++	  return true;
+ 	case BOUNDS_LOWER:
+-	  return ev.formatted_print ("use of attacker-controlled value"
+-				     " as size without upper-bounds checking");
++	  pp_printf (&pp,
++		     "use of attacker-controlled value"
++		     " as size without upper-bounds checking");
++	  return true;
+ 	}
+   }
+ };
+@@ -625,17 +703,20 @@ public:
+ 			" without checking for zero");
+   }
+ 
+-  label_text describe_final_event (const evdesc::final_event &ev) final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &) final override
+   {
+     if (m_arg)
+-      return ev.formatted_print
+-	("use of attacker-controlled value %qE as divisor"
+-	 " without checking for zero",
+-	 m_arg);
++      pp_printf (&pp,
++		 "use of attacker-controlled value %qE as divisor"
++		 " without checking for zero",
++		 m_arg);
+     else
+-      return ev.formatted_print
+-	("use of attacker-controlled value as divisor"
+-	 " without checking for zero");
++      pp_printf (&pp,
++		 "use of attacker-controlled value as divisor"
++		 " without checking for zero");
++    return true;
+   }
+ };
+ 
+@@ -741,7 +822,9 @@ public:
+     return warned;
+   }
+ 
+-  label_text describe_final_event (const evdesc::final_event &ev) final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &) final override
+   {
+     if (m_arg)
+       switch (m_has_bounds)
+@@ -749,20 +832,23 @@ public:
+ 	default:
+ 	  gcc_unreachable ();
+ 	case BOUNDS_NONE:
+-	  return ev.formatted_print
+-	    ("use of attacker-controlled value %qE as allocation size"
+-	     " without bounds checking",
+-	     m_arg);
++	  pp_printf (&pp,
++		     "use of attacker-controlled value %qE as allocation size"
++		     " without bounds checking",
++		     m_arg);
++	  return true;
+ 	case BOUNDS_UPPER:
+-	  return ev.formatted_print
+-	    ("use of attacker-controlled value %qE as allocation size"
+-	     " without lower-bounds checking",
+-	     m_arg);
++	  pp_printf (&pp,
++		     "use of attacker-controlled value %qE as allocation size"
++		     " without lower-bounds checking",
++		     m_arg);
++	  return true;
+ 	case BOUNDS_LOWER:
+-	  return ev.formatted_print
+-	    ("use of attacker-controlled value %qE as allocation size"
+-	     " without upper-bounds checking",
+-	     m_arg);
++	  pp_printf (&pp,
++		     "use of attacker-controlled value %qE as allocation size"
++		     " without upper-bounds checking",
++		     m_arg);
++	  return true;
+ 	}
+     else
+       switch (m_has_bounds)
+@@ -770,17 +856,20 @@ public:
+ 	default:
+ 	  gcc_unreachable ();
+ 	case BOUNDS_NONE:
+-	  return ev.formatted_print
+-	    ("use of attacker-controlled value as allocation size"
+-	     " without bounds checking");
++	  pp_printf (&pp,
++		     "use of attacker-controlled value as allocation size"
++		     " without bounds checking");
++	  return true;
+ 	case BOUNDS_UPPER:
+-	  return ev.formatted_print
+-	    ("use of attacker-controlled value as allocation size"
+-	     " without lower-bounds checking");
++	  pp_printf (&pp,
++		     "use of attacker-controlled value as allocation size"
++		     " without lower-bounds checking");
++	  return true;
+ 	case BOUNDS_LOWER:
+-	  return ev.formatted_print
+-	    ("use of attacker-controlled value as allocation size"
+-	     " without upper-bounds checking");
++	  pp_printf (&pp,
++		     "use of attacker-controlled value as allocation size"
++		     " without upper-bounds checking");
++	  return true;
+ 	}
+   }
+ 
+@@ -859,25 +948,33 @@ public:
+       return pending_diagnostic::fixup_location (loc, primary);
+   }
+ 
+-  label_text describe_state_change (const evdesc::state_change &change) override
++  bool
++  describe_state_change (pretty_printer &pp,
++			 const evdesc::state_change &change) override
+   {
+     if (change.m_new_state == m_sm.m_tainted_control_flow)
+-      return change.formatted_print
+-	("use of attacker-controlled value for control flow");
+-    return taint_diagnostic::describe_state_change (change);
++      {
++	pp_printf (&pp,
++		   "use of attacker-controlled value for control flow");
++	return true;
++      }
++    return taint_diagnostic::describe_state_change (pp, change);
+   }
+ 
+-  label_text describe_final_event (const evdesc::final_event &ev) final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &) final override
+   {
+     if (mention_noreturn_attribute_p ())
+-      return ev.formatted_print
+-	("treating %qE as an assertion failure handler"
+-	 " due to %<__attribute__((__noreturn__))%>",
+-	 m_assert_failure_fndecl);
++      pp_printf (&pp,
++		 "treating %qE as an assertion failure handler"
++		 " due to %<__attribute__((__noreturn__))%>",
++		 m_assert_failure_fndecl);
+     else
+-      return ev.formatted_print
+-	("treating %qE as an assertion failure handler",
+-	 m_assert_failure_fndecl);
++      pp_printf (&pp,
++		 "treating %qE as an assertion failure handler",
++		 m_assert_failure_fndecl);
++    return true;
+   }
+ 
+ private:
+diff --git a/gcc/analyzer/varargs.cc b/gcc/analyzer/varargs.cc
+index 734323e6f789..2159c47ce85e 100644
+--- a/gcc/analyzer/varargs.cc
++++ b/gcc/analyzer/varargs.cc
+@@ -28,6 +28,7 @@ along with GCC; see the file COPYING3.  If not see
+ #include "function.h"
+ #include "basic-block.h"
+ #include "gimple.h"
++#include "diagnostic-core.h"
+ #include "diagnostic-path.h"
+ #include "analyzer/analyzer.h"
+ #include "analyzer/analyzer-logging.h"
+@@ -326,12 +327,16 @@ public:
+ 	    && same_tree_p (m_ap_tree, other.m_ap_tree));
+   }
+ 
+-  label_text describe_state_change (const evdesc::state_change &change)
+-    override
++  bool
++  describe_state_change (pretty_printer &pp,
++			 const evdesc::state_change &change) override
+   {
+     if (const char *fnname = maybe_get_fnname (change))
+-      return change.formatted_print ("%qs called here", fnname);
+-    return label_text ();
++      {
++	pp_printf (&pp, "%qs called here", fnname);
++	return true;
++      }
++    return false;
+   }
+ 
+   diagnostic_event::meaning
+@@ -413,38 +418,42 @@ public:
+     return "va_list_use_after_va_end";
+   }
+ 
+-  label_text describe_state_change (const evdesc::state_change &change)
+-    final override
++  bool
++  describe_state_change (pretty_printer &pp,
++			 const evdesc::state_change &change) final override
+   {
+     if (change.m_new_state == m_sm.m_ended)
+       m_va_end_event = change.m_event_id;
+-    return va_list_sm_diagnostic::describe_state_change (change);
++    return va_list_sm_diagnostic::describe_state_change (pp, change);
+   }
+ 
+-  label_text describe_final_event (const evdesc::final_event &ev) final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &ev) final override
+   {
+     if (ev.m_expr)
+       {
+ 	if (m_va_end_event.known_p ())
+-	  return ev.formatted_print
+-	    ("%qs on %qE after %qs at %@",
+-	     m_usage_fnname, ev.m_expr, "va_end", &m_va_end_event);
++	  pp_printf (&pp,
++		     "%qs on %qE after %qs at %@",
++		     m_usage_fnname, ev.m_expr, "va_end", &m_va_end_event);
+ 	else
+-	  return ev.formatted_print
+-	    ("%qs on %qE after %qs",
+-	     m_usage_fnname, ev.m_expr, "va_end");
++	  pp_printf (&pp,
++		     "%qs on %qE after %qs",
++		     m_usage_fnname, ev.m_expr, "va_end");
+       }
+     else
+       {
+ 	if (m_va_end_event.known_p ())
+-	  return ev.formatted_print
+-	    ("%qs after %qs at %@",
+-	     m_usage_fnname, "va_end", &m_va_end_event);
++	  pp_printf (&pp,
++		     "%qs after %qs at %@",
++		     m_usage_fnname, "va_end", &m_va_end_event);
+ 	else
+-	  return ev.formatted_print
+-	    ("%qs after %qs",
+-	     m_usage_fnname, "va_end");
++	  pp_printf (&pp,
++		     "%qs after %qs",
++		     m_usage_fnname, "va_end");
+       }
++    return true;
+   }
+ 
+ private:
+@@ -483,41 +492,45 @@ public:
+ 
+   const char *get_kind () const final override { return "va_list_leak"; }
+ 
+-  label_text describe_state_change (const evdesc::state_change &change)
+-    final override
++  bool
++  describe_state_change (pretty_printer &pp,
++			 const evdesc::state_change &change) final override
+   {
+     if (change.m_new_state == m_sm.m_started)
+       {
+ 	m_start_event = change.m_event_id;
+ 	m_start_event_fnname = maybe_get_fnname (change);
+       }
+-    return va_list_sm_diagnostic::describe_state_change (change);
++    return va_list_sm_diagnostic::describe_state_change (pp, change);
+   }
+ 
+-  label_text describe_final_event (const evdesc::final_event &ev) final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &ev) final override
+   {
+     if (ev.m_expr)
+       {
+ 	if (m_start_event.known_p () && m_start_event_fnname)
+-	  return ev.formatted_print
+-	    ("missing call to %qs on %qE to match %qs at %@",
+-	     "va_end", ev.m_expr, m_start_event_fnname, &m_start_event);
++	  pp_printf (&pp,
++		     "missing call to %qs on %qE to match %qs at %@",
++		     "va_end", ev.m_expr, m_start_event_fnname, &m_start_event);
+ 	else
+-	  return ev.formatted_print
+-	    ("missing call to %qs on %qE",
+-	     "va_end", ev.m_expr);
++	  pp_printf (&pp,
++		     "missing call to %qs on %qE",
++		     "va_end", ev.m_expr);
+       }
+     else
+       {
+ 	if (m_start_event.known_p () && m_start_event_fnname)
+-	  return ev.formatted_print
+-	    ("missing call to %qs to match %qs at %@",
+-	     "va_end", m_start_event_fnname, &m_start_event);
++	  pp_printf (&pp,
++		     "missing call to %qs to match %qs at %@",
++		     "va_end", m_start_event_fnname, &m_start_event);
+ 	else
+-	  return ev.formatted_print
+-	    ("missing call to %qs",
+-	     "va_end");
++	  pp_printf (&pp,
++		     "missing call to %qs",
++		     "va_end");
+       }
++    return true;
+   }
+ 
+ private:
+@@ -782,15 +795,15 @@ public:
+       {
+       }
+ 
+-      label_text get_desc (bool can_colorize) const override
++      void print_desc (pretty_printer &pp) const override
+       {
+-	return make_label_text_n
+-	  (can_colorize, m_num_variadic_arguments,
+-	   "calling %qE from %qE with %i variadic argument",
+-	   "calling %qE from %qE with %i variadic arguments",
+-	   get_callee_fndecl (),
+-	   get_caller_fndecl (),
+-	   m_num_variadic_arguments);
++	pp_printf_n (&pp,
++		     m_num_variadic_arguments,
++		     "calling %qE from %qE with %i variadic argument",
++		     "calling %qE from %qE with %i variadic arguments",
++		     get_callee_fndecl (),
++		     get_caller_fndecl (),
++		     m_num_variadic_arguments);
+       }
+     private:
+       int m_num_variadic_arguments;
+@@ -900,13 +913,17 @@ public:
+     return warned;
+   }
+ 
+-  label_text describe_final_event (const evdesc::final_event &ev) final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &) final override
+   {
+-    return ev.formatted_print ("%<va_arg%> expected %qT but received %qT"
+-			       " for variadic argument %i of %qE",
+-			       m_expected_type, m_actual_type,
+-			       get_variadic_index_for_diagnostic (),
+-			       m_va_list_tree);
++    pp_printf (&pp,
++	       "%<va_arg%> expected %qT but received %qT"
++	       " for variadic argument %i of %qE",
++	       m_expected_type, m_actual_type,
++	       get_variadic_index_for_diagnostic (),
++	       m_va_list_tree);
++    return true;
+   }
+ 
+ private:
+@@ -944,10 +961,14 @@ public:
+     return warned;
+   }
+ 
+-  label_text describe_final_event (const evdesc::final_event &ev) final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &) final override
+   {
+-    return ev.formatted_print ("%qE has no more arguments (%i consumed)",
+-			       m_va_list_tree, get_num_consumed ());
++    pp_printf (&pp,
++	       "%qE has no more arguments (%i consumed)",
++	       m_va_list_tree, get_num_consumed ());
++    return true;
+   }
+ };
+ 
+diff --git a/gcc/diagnostic-format-json.cc b/gcc/diagnostic-format-json.cc
+index 48b836768b15..d863712a6e31 100644
+--- a/gcc/diagnostic-format-json.cc
++++ b/gcc/diagnostic-format-json.cc
+@@ -200,6 +200,7 @@ json_from_metadata (const diagnostic_metadata *metadata)
+ 
+ static std::unique_ptr<json::array>
+ make_json_for_path (diagnostic_context &context,
++		    pretty_printer *ref_pp,
+ 		    const diagnostic_path *path)
+ {
+   std::unique_ptr<json::array> path_array = ::make_unique<json::array> ();
+@@ -212,8 +213,9 @@ make_json_for_path (diagnostic_context &context,
+ 	event_obj->set ("location",
+ 			json_from_expanded_location (context,
+ 						     event.get_location ()));
+-      label_text event_text (event.get_desc (false));
+-      event_obj->set_string ("description", event_text.get ());
++      auto pp = ref_pp->clone ();
++      event.print_desc (*pp.get ());
++      event_obj->set_string ("description", pp_formatted_text (pp.get ()));
+       if (const logical_location *logical_loc = event.get_logical_location ())
+ 	{
+ 	  label_text name (logical_loc->get_name_for_path_output ());
+@@ -329,7 +331,7 @@ json_output_format::on_report_diagnostic (const diagnostic_info &diagnostic,
+ 
+   const diagnostic_path *path = richloc->get_path ();
+   if (path)
+-    diag_obj->set ("path", make_json_for_path (m_context, path));
++    diag_obj->set ("path", make_json_for_path (m_context, get_printer (), path));
+ 
+   diag_obj->set_bool ("escape-source", richloc->escape_on_output_p ());
+ }
+diff --git a/gcc/diagnostic-format-sarif.cc b/gcc/diagnostic-format-sarif.cc
+index 84731a2afce8..47b67c2c1c14 100644
+--- a/gcc/diagnostic-format-sarif.cc
++++ b/gcc/diagnostic-format-sarif.cc
+@@ -2089,9 +2089,11 @@ sarif_builder::make_location_object (sarif_location_manager &loc_mgr,
+   set_any_logical_locs_arr (*location_obj, logical_loc);
+ 
+   /* "message" property (SARIF v2.1.0 section 3.28.5).  */
+-  label_text ev_desc = event.get_desc (false);
+-  location_obj->set<sarif_message> ("message",
+-				    make_message_object (ev_desc.get ()));
++  std::unique_ptr<pretty_printer> pp = get_printer ()->clone ();
++  event.print_desc (*pp);
++  location_obj->set<sarif_message>
++    ("message",
++     make_message_object (pp_formatted_text (pp.get ())));
+ 
+   add_any_include_chain (loc_mgr, *location_obj.get (), loc);
+ 
+diff --git a/gcc/diagnostic-path.cc b/gcc/diagnostic-path.cc
+index 3f7d4fb50156..c0ce8e5f26a0 100644
+--- a/gcc/diagnostic-path.cc
++++ b/gcc/diagnostic-path.cc
+@@ -33,6 +33,7 @@ along with GCC; see the file COPYING3.  If not see
+ #include "diagnostic-color.h"
+ #include "diagnostic-event-id.h"
+ #include "diagnostic-label-effects.h"
++#include "pretty-print-markup.h"
+ #include "selftest.h"
+ #include "selftest-diagnostic.h"
+ #include "selftest-diagnostic-path.h"
+@@ -154,6 +155,18 @@ diagnostic_event::meaning::maybe_get_property_str (enum property p)
+     }
+ }
+ 
++/* Generate a label_text containing the description of this event
++   (for debugging/logging purposes).  */
++
++label_text
++diagnostic_event::get_desc () const
++{
++  auto pp = global_dc->clone_printer ();
++  pp_show_color (pp.get ()) = false;
++  print_desc (*pp.get ());
++  return label_text::take (xstrdup (pp_formatted_text (pp.get ())));
++}
++
+ /* class diagnostic_path.  */
+ 
+ /* Subroutine of diagnostic_path::interprocedural_p.
+@@ -261,38 +274,33 @@ class path_label : public range_label
+     unsigned event_idx = m_start_idx + range_idx;
+     const diagnostic_event &event = m_path.get_event (event_idx);
+ 
+-    /* Get the description of the event, perhaps with colorization:
+-       normally, we don't colorize within a range_label, but this
+-       is special-cased for diagnostic paths.  */
+-    label_text event_text (event.get_desc (m_colorize));
+-    gcc_assert (event_text.get ());
+-
+     const diagnostic_event::meaning meaning (event.get_meaning ());
+ 
+-    pretty_printer pp;
+-    pp_show_color (&pp) = m_colorize;
++    auto pp = global_dc->clone_printer ();
++    pp_show_color (pp.get ()) = m_colorize;
+     diagnostic_event_id_t event_id (event_idx);
+ 
+-    pp_printf (&pp, "%@", &event_id);
+-    pp_space (&pp);
++    pp_printf (pp.get (), "%@", &event_id);
++    pp_space (pp.get ());
+ 
+     if (meaning.m_verb == diagnostic_event::VERB_danger
+ 	&& m_allow_emojis)
+       {
+-	pp_unicode_character (&pp, 0x26A0); /* U+26A0 WARNING SIGN.  */
++	pp_unicode_character (pp.get (), 0x26A0); /* U+26A0 WARNING SIGN.  */
+ 	/* Append U+FE0F VARIATION SELECTOR-16 to select the emoji
+ 	   variation of the char.  */
+-	pp_unicode_character (&pp, 0xFE0F);
++	pp_unicode_character (pp.get (), 0xFE0F);
+ 	/* U+26A0 WARNING SIGN has East_Asian_Width == Neutral, but in its
+ 	   emoji variant is printed (by vte at least) with a 2nd half
+ 	   overlapping the next char.  Hence we add two spaces here: a space
+ 	   to be covered by this overlap, plus another space of padding.  */
+-	pp_string (&pp, "  ");
++	pp_string (pp.get (), "  ");
+       }
+ 
+-    pp_printf (&pp, "%s", event_text.get ());
++    event.print_desc (*pp.get ());
+ 
+-    label_text result = label_text::take (xstrdup (pp_formatted_text (&pp)));
++    label_text result
++      = label_text::take (xstrdup (pp_formatted_text (pp.get ())));
+     return result;
+   }
+ 
+@@ -667,8 +675,8 @@ struct event_range
+ 	  {
+ 	    const diagnostic_event &iter_event = m_path.get_event (i);
+ 	    diagnostic_event_id_t event_id (i);
+-	    label_text event_text (iter_event.get_desc (true));
+-	    pp_printf (&pp, " %@: %s", &event_id, event_text.get ());
++	    pp_printf (&pp, " %@: ", &event_id);
++	    iter_event.print_desc (pp);
+ 	    pp_newline (&pp);
+ 	  }
+ 	return;
+@@ -1102,6 +1110,25 @@ print_path_summary_as_text (const path_summary &ps,
+ 
+ } /* end of anonymous namespace for path-printing code.  */
+ 
++class element_event_desc : public pp_element
++{
++public:
++  element_event_desc (const diagnostic_event &event)
++  : m_event (event)
++  {
++  }
++
++  void add_to_phase_2 (pp_markup::context &ctxt) final override
++  {
++    auto pp = ctxt.m_pp.clone ();
++    m_event.print_desc (*pp.get ());
++    pp_string (&ctxt.m_pp, pp_formatted_text (pp.get ()));
++  }
++
++private:
++  const diagnostic_event &m_event;
++};
++
+ /* Print PATH according to the context's path_format.  */
+ 
+ void
+@@ -1121,8 +1148,7 @@ diagnostic_text_output_format::print_path (const diagnostic_path &path)
+ 	for (unsigned i = 0; i < num_events; i++)
+ 	  {
+ 	    const diagnostic_event &event = path.get_event (i);
+-	    label_text event_text (event.get_desc (false));
+-	    gcc_assert (event_text.get ());
++	    element_event_desc e_event_desc (event);
+ 	    diagnostic_event_id_t event_id (i);
+ 	    if (get_context ().show_path_depths_p ())
+ 	      {
+@@ -1135,19 +1161,19 @@ diagnostic_text_output_format::print_path (const diagnostic_path &path)
+ 		  {
+ 		    label_text name (logical_loc->get_name_for_path_output ());
+ 		    inform (event.get_location (),
+-			    "%@ %s (fndecl %qs, depth %i)",
+-			    &event_id, event_text.get (),
++			    "%@ %e (fndecl %qs, depth %i)",
++			    &event_id, &e_event_desc,
+ 			    name.get (), stack_depth);
+ 		  }
+ 		else
+ 		  inform (event.get_location (),
+-			  "%@ %s (depth %i)",
+-			  &event_id, event_text.get (),
++			  "%@ %e (depth %i)",
++			  &event_id, &e_event_desc,
+ 			  stack_depth);
+ 	      }
+ 	    else
+ 	      inform (event.get_location (),
+-		      "%@ %s", &event_id, event_text.get ());
++		      "%@ %e", &event_id, &e_event_desc);
+ 	  }
+       }
+       break;
+diff --git a/gcc/diagnostic-path.h b/gcc/diagnostic-path.h
+index 7497b0a7199d..3b2048b994d1 100644
+--- a/gcc/diagnostic-path.h
++++ b/gcc/diagnostic-path.h
+@@ -146,8 +146,8 @@ class diagnostic_event
+      calls, returns, and frame nesting.  */
+   virtual int get_stack_depth () const = 0;
+ 
+-  /* Get a localized (and possibly colorized) description of this event.  */
+-  virtual label_text get_desc (bool can_colorize) const = 0;
++  /* Print a localized (and possibly colorized) description of this event.  */
++  virtual void print_desc (pretty_printer &pp) const = 0;
+ 
+   /* Get a logical_location for this event, or nullptr if there is none.  */
+   virtual const logical_location *get_logical_location () const = 0;
+@@ -166,6 +166,8 @@ class diagnostic_event
+   maybe_add_sarif_properties (sarif_object &/*thread_flow_loc_obj*/) const
+   {
+   }
++
++  label_text get_desc () const;
+ };
+ 
+ /* Abstract base class representing a thread of execution within
+diff --git a/gcc/pretty-print.cc b/gcc/pretty-print.cc
+index c8d78fa73d8c..12c91798f417 100644
+--- a/gcc/pretty-print.cc
++++ b/gcc/pretty-print.cc
+@@ -2519,6 +2519,31 @@ pp_printf (pretty_printer *pp, const char *msg, ...)
+   va_end (ap);
+ }
+ 
++/* FIXME.  */
++
++void
++pp_printf_n (pretty_printer *pp,
++	     unsigned HOST_WIDE_INT n,
++	     const char *singular_gmsgid, const char *plural_gmsgid, ...)
++{
++  va_list ap;
++
++  va_start (ap, plural_gmsgid);
++
++  unsigned long gtn;
++  if (sizeof n <= sizeof gtn)
++    gtn = n;
++  else
++    /* Use the largest number ngettext can handle, otherwise
++       preserve the six least significant decimal digits for
++       languages where the plural form depends on them.  */
++    gtn = n <= ULONG_MAX ? n : n % 1000000LU + 1000000LU;
++  const char *msg = ngettext (singular_gmsgid, plural_gmsgid, gtn);
++  text_info text (msg, &ap, errno);
++  pp_format (pp, &text);
++  pp_output_formatted_text (pp);
++  va_end (ap);
++}
+ 
+ /* Output MESSAGE verbatim into BUFFER.  */
+ void
+diff --git a/gcc/pretty-print.h b/gcc/pretty-print.h
+index 96d431876057..d1495367b232 100644
+--- a/gcc/pretty-print.h
++++ b/gcc/pretty-print.h
+@@ -587,6 +587,11 @@ extern void pp_separate_with (pretty_printer *, char);
+ extern void pp_printf (pretty_printer *, const char *, ...)
+      ATTRIBUTE_GCC_PPDIAG(2,3);
+ 
++extern void pp_printf_n (pretty_printer *, unsigned HOST_WIDE_INT n,
++			 const char *, const char *, ...)
++     ATTRIBUTE_GCC_PPDIAG(3,5)
++     ATTRIBUTE_GCC_PPDIAG(4,5);
++
+ extern void pp_verbatim (pretty_printer *, const char *, ...)
+      ATTRIBUTE_GCC_PPDIAG(2,3);
+ extern void pp_flush (pretty_printer *);
+diff --git a/gcc/selftest-diagnostic-path.h b/gcc/selftest-diagnostic-path.h
+index 51786a0f5899..6f6bb5c62079 100644
+--- a/gcc/selftest-diagnostic-path.h
++++ b/gcc/selftest-diagnostic-path.h
+@@ -48,9 +48,9 @@ class test_diagnostic_event : public diagnostic_event
+ 
+   location_t get_location () const final override { return m_loc; }
+   int get_stack_depth () const final override { return m_depth; }
+-  label_text get_desc (bool) const final override
++  void print_desc (pretty_printer &pp) const final override
+   {
+-    return label_text::borrow (m_desc);
++    pp_string (&pp, m_desc);
+   }
+   const logical_location *get_logical_location () const final override
+   {
+diff --git a/gcc/simple-diagnostic-path.cc b/gcc/simple-diagnostic-path.cc
+index e1fcd565c8a6..0592080f3ae4 100644
+--- a/gcc/simple-diagnostic-path.cc
++++ b/gcc/simple-diagnostic-path.cc
+@@ -191,6 +191,12 @@ simple_diagnostic_event::~simple_diagnostic_event ()
+   free (m_desc);
+ }
+ 
++void
++simple_diagnostic_event::print_desc (pretty_printer &pp) const
++{
++  pp_string (&pp, m_desc);
++}
++
+ #if CHECKING_P
+ 
+ namespace selftest {
+@@ -209,8 +215,8 @@ test_intraprocedural_path (pretty_printer *event_pp)
+   ASSERT_EQ (path.num_events (), 2);
+   ASSERT_EQ (path.num_threads (), 1);
+   ASSERT_FALSE (path.interprocedural_p ());
+-  ASSERT_STREQ (path.get_event (0).get_desc (false).get (), "first `free'");
+-  ASSERT_STREQ (path.get_event (1).get_desc (false).get (), "double `free'");
++  ASSERT_STREQ (path.get_event (0).get_desc ().get (), "first `free'");
++  ASSERT_STREQ (path.get_event (1).get_desc ().get (), "double `free'");
+ }
+ 
+ /* Run all of the selftests within this file.  */
+diff --git a/gcc/simple-diagnostic-path.h b/gcc/simple-diagnostic-path.h
+index 5147df5185bb..4d7f7ae8a26c 100644
+--- a/gcc/simple-diagnostic-path.h
++++ b/gcc/simple-diagnostic-path.h
+@@ -39,10 +39,7 @@ class simple_diagnostic_event : public diagnostic_event
+ 
+   location_t get_location () const final override { return m_loc; }
+   int get_stack_depth () const final override { return m_depth; }
+-  label_text get_desc (bool) const final override
+-  {
+-    return label_text::borrow (m_desc);
+-  }
++  void print_desc (pretty_printer &pp) const final override;
+   const logical_location *get_logical_location () const final override
+   {
+     if (m_fndecl)
+diff --git a/gcc/testsuite/gcc.dg/plugin/analyzer_cpython_plugin.c b/gcc/testsuite/gcc.dg/plugin/analyzer_cpython_plugin.c
+index c1510e441e6f..18153b0733c4 100644
+--- a/gcc/testsuite/gcc.dg/plugin/analyzer_cpython_plugin.c
++++ b/gcc/testsuite/gcc.dg/plugin/analyzer_cpython_plugin.c
+@@ -702,12 +702,12 @@ kf_PyList_Append::impl_call_post (const call_details &cd) const
+   public:
+     realloc_success_no_move (const call_details &cd) : call_info (cd) {}
+ 
+-    label_text
+-    get_desc (bool can_colorize) const final override
++    void
++    print_desc (pretty_printer &pp) const final override
+     {
+-      return make_label_text (
+-          can_colorize, "when %qE succeeds, without moving underlying buffer",
+-          get_fndecl ());
++      pp_printf (&pp,
++		 "when %qE succeeds, without moving underlying buffer",
++		 get_fndecl ());
+     }
+ 
+     bool
+@@ -812,11 +812,12 @@ kf_PyList_Append::impl_call_post (const call_details &cd) const
+   public:
+     realloc_success_move (const call_details &cd) : call_info (cd) {}
+ 
+-    label_text
+-    get_desc (bool can_colorize) const final override
++    void
++    print_desc (pretty_printer &pp) const final override
+     {
+-      return make_label_text (can_colorize, "when %qE succeeds, moving buffer",
+-                              get_fndecl ());
++      pp_printf (&pp,
++		 "when %qE succeeds, moving buffer",
++		 get_fndecl ());
+     }
+ 
+     bool
+diff --git a/gcc/testsuite/gcc.dg/plugin/analyzer_gil_plugin.c b/gcc/testsuite/gcc.dg/plugin/analyzer_gil_plugin.c
+index 1d4d66e0fd2b..77767c88ad74 100644
+--- a/gcc/testsuite/gcc.dg/plugin/analyzer_gil_plugin.c
++++ b/gcc/testsuite/gcc.dg/plugin/analyzer_gil_plugin.c
+@@ -101,16 +101,23 @@ public:
+     return loc;
+   }
+ 
+-  label_text describe_state_change (const evdesc::state_change &change)
+-    final override
++  bool
++  describe_state_change (pretty_printer &pp,
++			 const evdesc::state_change &change) final override
+   {
+     if (change.is_global_p ()
+ 	&& change.m_new_state == m_sm.m_released_gil)
+-      return change.formatted_print ("releasing the GIL here");
++      {
++	pp_string (&pp, "releasing the GIL here");
++	return true;
++      }
+     if (change.is_global_p ()
+ 	&& change.m_new_state == m_sm.get_start_state ())
+-      return change.formatted_print ("acquiring the GIL here");
+-    return label_text ();
++      {
++	pp_string (&pp, "acquiring the GIL here");
++	return true;
++      }
++    return false;
+   }
+ 
+   diagnostic_event::meaning
+@@ -161,10 +168,14 @@ class double_save_thread : public gil_diagnostic
+     return ctxt.warn ("nested usage of %qs", "Py_BEGIN_ALLOW_THREADS");
+   }
+ 
+-  label_text describe_final_event (const evdesc::final_event &ev) final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &ev) final override
+   {
+-    return ev.formatted_print ("nested usage of %qs here",
+-			       "Py_BEGIN_ALLOW_THREADS");
++    pp_printf (&pp,
++	       "nested usage of %qs here",
++	       "Py_BEGIN_ALLOW_THREADS");
++    return true;
+   }
+ 
+  private:
+@@ -206,16 +217,19 @@ class fncall_without_gil : public gil_diagnostic
+ 			m_arg_idx + 1, m_callee_fndecl);
+   }
+ 
+-  label_text describe_final_event (const evdesc::final_event &ev) final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &ev) final override
+   {
+     if (m_callee_fndecl)
+-      return ev.formatted_print ("use of PyObject as argument %i of %qE here"
+-				 " without the GIL",
+-				 m_arg_idx + 1, m_callee_fndecl);
++      pp_printf (&pp,
++		 "use of PyObject as argument %i of %qE here without the GIL",
++		 m_arg_idx + 1, m_callee_fndecl);
+     else
+-      return ev.formatted_print ("use of PyObject as argument %i of call here"
+-				 " without the GIL",
+-				 m_arg_idx + 1, m_callee_fndecl);
++      pp_printf (&pp,
++		 "use of PyObject as argument %i of call here without the GIL",
++		 m_arg_idx + 1, m_callee_fndecl);
++    return true;
+   }
+ 
+  private:
+@@ -247,10 +261,14 @@ class pyobject_usage_without_gil : public gil_diagnostic
+     return ctxt.warn ("use of PyObject %qE without the GIL", m_expr);
+   }
+ 
+-  label_text describe_final_event (const evdesc::final_event &ev) final override
++  bool
++  describe_final_event (pretty_printer &pp,
++			const evdesc::final_event &ev) final override
+   {
+-    return ev.formatted_print ("PyObject %qE used here without the GIL",
+-			       m_expr);
++    pp_printf (&pp,
++	       "PyObject %qE used here without the GIL",
++	       m_expr);
++    return true;
+   }
+ 
+  private:
+diff --git a/gcc/testsuite/gcc.dg/plugin/diagnostic_group_plugin.c b/gcc/testsuite/gcc.dg/plugin/diagnostic_group_plugin.c
+index 2f780338b6e7..7e6d7e1de25e 100644
+--- a/gcc/testsuite/gcc.dg/plugin/diagnostic_group_plugin.c
++++ b/gcc/testsuite/gcc.dg/plugin/diagnostic_group_plugin.c
+@@ -29,6 +29,7 @@
+ #include "diagnostic.h"
+ #include "diagnostic-format-text.h"
+ #include "context.h"
++#include "make-unique.h"
+ 
+ int plugin_is_GPL_compatible;
+ 
+@@ -229,7 +230,7 @@ plugin_init (struct plugin_name_args *plugin_info,
+ 
+   diagnostic_text_starter (global_dc) = test_diagnostic_text_starter;
+   diagnostic_start_span (global_dc) = test_diagnostic_start_span_fn;
+-  global_dc->set_output_format (new test_output_format (*global_dc));
++  global_dc->set_output_format (::make_unique<test_output_format> (*global_dc));
+ 
+   pass_info.pass = new pass_test_groups (g);
+   pass_info.reference_pass_name = "*warn_function_noreturn";
+diff --git a/gcc/testsuite/gcc.dg/plugin/diagnostic_plugin_xhtml_format.c b/gcc/testsuite/gcc.dg/plugin/diagnostic_plugin_xhtml_format.c
+index 2ce8cc29660c..0534ff47450c 100644
+--- a/gcc/testsuite/gcc.dg/plugin/diagnostic_plugin_xhtml_format.c
++++ b/gcc/testsuite/gcc.dg/plugin/diagnostic_plugin_xhtml_format.c
+@@ -48,6 +48,7 @@ along with GCC; see the file COPYING3.  If not see
+ #include "intl.h"
+ #include "gcc-plugin.h"
+ #include "plugin-version.h"
++#include "make-unique.h"
+ 
+ namespace xml {
+ 
+@@ -714,7 +715,7 @@ diagnostic_output_format_init_xhtml (diagnostic_context &context,
+   pp_show_color (fmt->get_printer ()) = false;
+   context.set_show_highlight_colors (false);
+ 
+-  context.set_output_format (fmt.release ());
++  context.set_output_format (std::move (fmt));
+ }
+ 
+ /* Populate CONTEXT in preparation for XHTML output to stderr.  */
+@@ -853,9 +854,10 @@ plugin_init (struct plugin_name_args *plugin_info,
+   if (!plugin_default_version_check (version, &gcc_version))
+     return 1;
+ 
+-  global_dc->set_output_format (new xhtml_stream_output_format (*global_dc,
+-								line_table,
+-								stderr));
++  global_dc->set_output_format
++    (::make_unique<xhtml_stream_output_format> (*global_dc,
++						line_table,
++						stderr));
+ 
+ #if CHECKING_P
+   selftest::xhtml_format_selftests ();
+-- 
+2.26.3
+

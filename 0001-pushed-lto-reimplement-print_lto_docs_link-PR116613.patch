@@ -1,0 +1,47 @@
+From ed468fd0627d79a10065133b6bb48a041167aff0 Mon Sep 17 00:00:00 2001
+From: David Malcolm <dmalcolm@redhat.com>
+Date: Tue, 8 Oct 2024 09:46:34 -0400
+Subject: [PATCH 1/9] {pushed} lto: reimplement print_lto_docs_link [PR116613]
+
+gcc/ChangeLog:
+	PR other/116613
+	* lto-wrapper.cc (print_lto_docs_link): Use a format string rather
+	than building the string manually.  Fix memory leak of "url" by
+	using label_text.
+
+Signed-off-by: David Malcolm <dmalcolm@redhat.com>
+---
+ gcc/lto-wrapper.cc | 17 ++++-------------
+ 1 file changed, 4 insertions(+), 13 deletions(-)
+
+diff --git a/gcc/lto-wrapper.cc b/gcc/lto-wrapper.cc
+index 141856c9b67b..9d7fe18b2296 100644
+--- a/gcc/lto-wrapper.cc
++++ b/gcc/lto-wrapper.cc
+@@ -1366,19 +1366,10 @@ init_num_threads (void)
+ void
+ print_lto_docs_link ()
+ {
+-  bool print_url = global_dc->m_printer->supports_urls_p ();
+-  const char *url = global_dc->make_option_url (OPT_flto);
+-
+-  pretty_printer pp;
+-  pp.set_url_format (URL_FORMAT_DEFAULT);
+-  pp_string (&pp, "see the ");
+-  if (print_url)
+-    pp_begin_url (&pp, url);
+-  pp_string (&pp, "%<-flto%> option documentation");
+-  if (print_url)
+-    pp_end_url (&pp);
+-  pp_string (&pp, " for more information");
+-  inform (UNKNOWN_LOCATION, pp_formatted_text (&pp));
++  label_text url = label_text::take (global_dc->make_option_url (OPT_flto));
++  inform (UNKNOWN_LOCATION,
++	  "see the %{%<-flto%> option documentation%} for more information",
++	  url.get ());
+ }
+ 
+ /* Test that a make command is present and working, return true if so.  */
+-- 
+2.26.3
+

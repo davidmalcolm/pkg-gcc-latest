@@ -1,0 +1,27 @@
+From b1f2393c13d93d0b6a7b76533c82508609eddf7e Mon Sep 17 00:00:00 2001
+From: David Malcolm <dmalcolm@redhat.com>
+Date: Thu, 26 Sep 2024 10:59:30 -0400
+Subject: [PATCH 6/9] FIXME: hack in #define INCLUDE_MEMORY into system.h
+ (issues with Modula 2 bootstrap)
+
+---
+ gcc/system.h | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/gcc/system.h b/gcc/system.h
+index cbb14fb167d3..4bf78b67e859 100644
+--- a/gcc/system.h
++++ b/gcc/system.h
+@@ -762,6 +762,9 @@ private:
+    namespace, e.g. "_VSTD::abort();", which fails after we use the
+    preprocessor to redefine "abort" as "fancy_abort" below.  */
+ 
++// FIXME:
++#define INCLUDE_MEMORY
++
+ #ifdef INCLUDE_MEMORY
+ # include <memory>
+ #endif
+-- 
+2.26.3
+

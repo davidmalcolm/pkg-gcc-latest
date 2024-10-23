@@ -18,7 +18,7 @@
 
 Name:		gcc-latest
 Version:	VERSION
-Release:	PKGREL.SNAPINFO%{?dist}
+Release:	PKGREL.SNAPINFO.pr116613.v0.128%{?dist}
 Summary:	Weekly snapshot of GCC trunk
 
 License:	GPLv3+ and GPLv3+ with exceptions and GPLv2+ with exceptions and LGPLv2+ and BSD
@@ -45,13 +45,30 @@ Requires:	glibc >= 2.17
 
 Provides:	bundled(libiberty)
 
+Patch1: 0001-pushed-lto-reimplement-print_lto_docs_link-PR116613.patch
+Patch2: 0002-pushed-diagnostics-mark-the-JSON-output-format-as-de.patch
+Patch3: 0003-pushed-diagnostics-move-text-output-member-functions.patch
+Patch4: 0004-FIXME-analyzer_cpython_plugin.c-use-success_call_inf.patch
+Patch5: 0005-FIXME-use-unique_ptr-in-more-places-in-pretty_printe.patch
+Patch6: 0006-FIXME-hack-in-define-INCLUDE_MEMORY-into-system.h-is.patch
+Patch7: 0007-FIXME-WIP-on-get_desc-print_desc.patch
+Patch8: 0008-FIXME-WIP-on-fdiagnostics-add-output-PR116613.patch
+Patch9: 0009-FIXME-fixups-for-add-output.patch
 
 %description
 GNU C and C++ compilers built from a weekly development snapshot.
 
 %prep
 %setup -q -n BASENAME
-
+%patch 1 -p1
+%patch 2 -p1
+%patch 3 -p1
+%patch 4 -p1
+%patch 5 -p1
+%patch 6 -p1
+%patch 7 -p1
+%patch 8 -p1
+%patch 9 -p1
 
 %build
 CC=gcc
@@ -121,6 +138,9 @@ done
 
 
 %changelog
+* Fri Oct 11 2024 David Malcolm <dmalcolm@redhat.com> - 15.0.0-4.pr116613.v0.128
+- add work-in-progress patches for PR 116613
+
 * Thu Oct 12 2023 Andrew Potter <agpotter@gmail.com> - 14.0.0-4
 - Exclude requires for libstdc++
 

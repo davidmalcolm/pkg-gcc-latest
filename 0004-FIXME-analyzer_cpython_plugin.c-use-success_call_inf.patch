@@ -1,0 +1,57 @@
+From 8b96073e88d0ea92394261710a6080bc2b09e061 Mon Sep 17 00:00:00 2001
+From: David Malcolm <dmalcolm@redhat.com>
+Date: Thu, 10 Oct 2024 16:36:11 -0400
+Subject: [PATCH 4/9] FIXME: analyzer_cpython_plugin.c: use success_call_info
+ in a couple of places
+
+---
+ .../gcc.dg/plugin/analyzer_cpython_plugin.c   | 22 ++++---------------
+ 1 file changed, 4 insertions(+), 18 deletions(-)
+
+diff --git a/gcc/testsuite/gcc.dg/plugin/analyzer_cpython_plugin.c b/gcc/testsuite/gcc.dg/plugin/analyzer_cpython_plugin.c
+index d0fe110f20e9..c1510e441e6f 100644
+--- a/gcc/testsuite/gcc.dg/plugin/analyzer_cpython_plugin.c
++++ b/gcc/testsuite/gcc.dg/plugin/analyzer_cpython_plugin.c
+@@ -963,17 +963,10 @@ public:
+ void
+ kf_PyList_New::impl_call_post (const call_details &cd) const
+ {
+-  class success : public call_info
++  class success : public success_call_info
+   {
+   public:
+-    success (const call_details &cd) : call_info (cd) {}
+-
+-    label_text
+-    get_desc (bool can_colorize) const final override
+-    {
+-      return make_label_text (can_colorize, "when %qE succeeds",
+-                              get_fndecl ());
+-    }
++    success (const call_details &cd) : success_call_info (cd) {}
+ 
+     bool
+     update_model (region_model *model, const exploded_edge *,
+@@ -1104,17 +1097,10 @@ public:
+ void
+ kf_PyLong_FromLong::impl_call_post (const call_details &cd) const
+ {
+-  class success : public call_info
++  class success : public success_call_info
+   {
+   public:
+-    success (const call_details &cd) : call_info (cd) {}
+-
+-    label_text
+-    get_desc (bool can_colorize) const final override
+-    {
+-      return make_label_text (can_colorize, "when %qE succeeds",
+-                              get_fndecl ());
+-    }
++    success (const call_details &cd) : success_call_info (cd) {}
+ 
+     bool
+     update_model (region_model *model, const exploded_edge *,
+-- 
+2.26.3
+
