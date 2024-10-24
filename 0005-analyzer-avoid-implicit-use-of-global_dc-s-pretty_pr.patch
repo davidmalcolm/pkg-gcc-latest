@@ -1,12 +1,222 @@
-From 6d7c563fbbd84711fa5239b7104c37093cda7851 Mon Sep 17 00:00:00 2001
+From 850cf8d28db36db4c1d7b31486a8fe4f97211489 Mon Sep 17 00:00:00 2001
 From: David Malcolm <dmalcolm@redhat.com>
 Date: Thu, 10 Oct 2024 09:06:43 -0400
-Subject: [PATCH 7/9] FIXME: WIP on get_desc -> print_desc
+Subject: [PATCH 5/8] analyzer: avoid implicit use of global_dc's
+ pretty_printer [PR116613]
 
+Previously, various places in the analyzer generated message strings
+by cloning the diagnostic_context's pretty_printer, printing to that
+pretty_printer's buffer, and then returning a copy of the buffer
+contents.
+
+This implicit use of a particular pretty printer doesn't work well for
+the "multiple diagnostic output formats" case (PR other/116613), such as
+differences in colorization, or in how phase 3 of formatting works.
+Hence as enabling work towards that, the following patch reworks the
+various functions returning a label_text string in favor of functions
+that print to a specific pretty_printer, such as diagnotic_event's
+"get_desc" vfunc, which becomes "print_desc".  This makes the particular
+pretty_printer in use explicit in each case.
+
+Previously, the various pending_diagnostic::describe_* vfuncs returned a
+label_text, with the return of an empty string signifying that no
+description could be generated.  With this patch, these vfuncs gain a
+"pretty_printer &" param and a bool return value and now either print to
+the pretty_printer and return true, or return false to signify the
+"no description available" case.
+
+No functional change intended.
+
+gcc/analyzer/ChangeLog:
+	PR other/116613
+	* bounds-checking.cc
+	(concrete_buffer_overflow::describe_final_event): Convert return
+	type from label_text to bool.  Add "pp" param and either print to
+	it and return true, or return false.
+	(concrete_buffer_overflow::describe_final_event_as_bytes): Convert
+	to print to a pp rather than returning a label_text.
+	(concrete_buffer_overflow::describe_final_event_as_bits):
+	Likewise.
+	(class concrete_buffer_over_read): Analogous changes to above.
+	(class concrete_buffer_underwrite): Likewise.
+	(class concrete_buffer_under_read): Likewise.
+	(class symbolic_buffer_overflow): Likewise.
+	(class symbolic_buffer_over_read): Likewise.
+	* call-details.cc (class overlapping_buffers): Likewise.
+	* call-info.cc (call_info::print): Reimplement.
+	(class call_info::add_events_to_path::call_event): Convert
+	"get_desc" vfunc to "print_desc", dropping return type, adding
+	"pp" param, and printing to it.
+	(class succeed_or_fail_call_info): Likewise.
+	* call-info.h (class call_info): Likewise.
+	(class succeed_or_fail_call_info): Likewise.
+	* checker-event.cc (checker_event::dump): Reimplement.
+	(checker_event::prepare_for_emission): Update for change from
+	get_desc to print_desc.
+	(debug_event::get_desc): Convert to...
+	(debug_event::print_desc): ...this.
+	(precanned_custom_event::get_desc): Convert to...
+	(precanned_custom_event::print_desc): ...this.
+	(statement_event::get_desc): Convert to...
+	(statement_event::print_desc): ...this.
+	(region_creation_event_memory_space::get_desc): Convert to...
+	(region_creation_event_memory_space::print_desc): ...this.
+	(region_creation_event_capacity::get_desc): Convert to...
+	(region_creation_event_capacity::print_desc): ...this.
+	(region_creation_event_allocation_size::get_desc): Convert to...
+	(region_creation_event_allocation_size::print_desc): ...this.
+	(region_creation_event_debug::get_desc): Convert to...
+	(region_creation_event_debug::print_desc): ...this.
+	(function_entry_event::get_desc): Convert to...
+	(function_entry_event::print_desc): ...this.
+	(state_change_event::get_desc): Convert to...
+	(state_change_event::print_desc): ...this.
+	(state_change_event::get_meaning): Update for change to
+	pending_diagnostic::get_meaning_for_state_change.
+	(superedge_event::should_filter_p): Convert from usage of get_desc
+	to print_desc.
+	(start_cfg_edge_event::get_desc): Convert to...
+	(start_cfg_edge_event::print_desc): ...this.
+	(call_event::get_desc): Convert to...
+	(call_event::print_desc): ...this.
+	(return_event::get_desc): Convert to...
+	(return_event::print_desc): ...this.
+	(start_consolidated_cfg_edges_event::get_desc): Convert to...
+	(start_consolidated_cfg_edges_event::print_desc): ...this.
+	(inlined_call_event::get_desc): Convert to...
+	(inlined_call_event::print_desc): ...this.
+	(setjmp_event::get_desc): Convert to...
+	(setjmp_event::print_desc): ...this.
+	(rewind_from_longjmp_event::get_desc): Convert to...
+	(rewind_from_longjmp_event::print_desc): ...this.
+	(rewind_to_setjmp_event::get_desc): Convert to...
+	(rewind_to_setjmp_event::print_desc): ...this.
+	(warning_event::get_desc): Convert to...
+	(warning_event::print_desc): ...this.
+	* checker-event.h: Convert the various "get_desc" vfunc decls to
+	"print_desc".
+	* checker-path.cc (checker_path::dump): Convert to usage of
+	checker_event::print_desc.
+	(checker_path::debug): Convert to debug form of
+	checker_event::get_desc.
+	* diagnostic-manager.cc
+	(diagnostic_manager::prune_interproc_events): Likewise.
+	(diagnostic_manager::prune_system_headers): Likewise.
+	* engine.cc (call_summary_edge_info::get_desc): Convert to...
+	(call_summary_edge_info::print_desc): ...this.
+	(stale_jmp_buf::describe_final_event): Update for change to
+	this vfunc.
+	(tainted_args_function_custom_event::get_desc): Convert to...
+	(tainted_args_function_custom_event::print_desc): ...this.
+	(tainted_args_field_custom_event::get_desc): Convert to...
+	(tainted_args_field_custom_event::print_desc): ...this.
+	(tainted_args_callback_custom_event::get_desc): Convert to...
+	(tainted_args_callback_custom_event::print_desc): ...this.
+	(jump_through_null::describe_final_event): Update for change to
+	this vfunc.
+	* infinite-loop.cc (perpetual_start_cfg_edge_event::get_desc):
+	Convert to...
+	(perpetual_start_cfg_edge_event::print_desc): ...this.
+	(looping_back_event::get_desc): Convert to...
+	(looping_back_event::print_desc): ...this.
+	(looping_back_event::describe_final_event): Update for change to
+	this vfunc.
+	* infinite-recursion.cc (class infinite_recursion_diagnostic):
+	Update for changes to pending_diagnostic.
+	* kf.cc (class putenv_of_auto_var): Likewise.
+	(kf_realloc::impl_call_post): Update for changes to call_info.
+	(kf_strchr::impl_call_post): Likewise.
+	(kf_strncpy::impl_call_post): Likewise.
+	(kf_strstr::impl_call_post): Likewise.
+	(class kf_strtok::undefined_behavior): Update for changes to
+	pending_diagnostic.
+	(class strtok_call_info): Update for changes to call_info.
+	* pending-diagnostic.cc (evdesc::event_desc::formatted_print):
+	Delete.
+	* pending-diagnostic.h (struct event_desc): Delete.
+	(struct state_change): Drop event_desc base class.
+	(struct call_with_state): Likewise.
+	(struct return_of_state): Likewise.
+	(struct final_event): Likewise.
+	(pending_event::describe_state_change): Convert return
+	type from label_text to bool.  Add "pp" param and either print to
+	it and return true, or return false.  Do the latter for the base
+	class implementation.
+	(pending_event::describe_call_with_state): Likewise.
+	(pending_event::describe_return_of_state): Likewise.
+	(pending_event::describe_final_event): Likewise.
+	* region-model.cc
+	(poisoned_value_diagnostic::describe_final_event): Update for
+	change to this vfunc.
+	(shift_count_negative_diagnostic::describe_final_event): Likewise.
+	(shift_count_overflow_diagnostic::describe_final_event): Likewise.
+	(ptrdiff_region_creation_event::get_desc): Convert to...
+	(ptrdiff_region_creation_event::print_desc): ...this.
+	(undefined_ptrdiff_diagnostic::describe_final_event): Update for
+	change to this vfunc.
+	(write_to_const_diagnostic::describe_final_event): Likewise.
+	(write_to_string_literal_diagnostic::describe_final_event):
+	Likewise.
+	(dubious_allocation_size::describe_final_event): Likewise.
+	(null_terminator_check_event::get_desc): Convert to...
+	(null_terminator_check_event::print_desc): ...this.
+	(float_as_size_arg::describe_final_event): Update for change to
+	this vfunc.
+	(exposure_through_uninit_copy::describe_final_event): Likewise.
+	* sm-fd.cc: Include "diagnostic-core.h".  Update throughout for
+	changes to pending_diagnostic vfuncs.
+	* sm-file.cc: Likewise.
+	* sm-malloc.cc: Likewise.
+	* sm-sensitive.cc: Likewise.
+	* sm-signal.cc: Likewise.
+	* sm-taint.cc: Likewise.
+	* varargs.cc: Likewise.
+
+gcc/ChangeLog:
+	PR other/116613
+	* diagnostic-format-json.cc (make_json_for_path): Add "ref_pp"
+	param and use when obtaining event descriptions.
+	(json_output_format::on_report_diagnostic): Pass this format's
+	printer as the above.
+	* diagnostic-format-sarif.cc
+	(sarif_builder::make_location_object): Clone this format's printer
+	and use it to obtain the text of the message.
+	* diagnostic-path.cc: Include "pretty-print-markup.h".
+	(diagnostic_event::get_desc): New.
+	(path_label::get_text): Update for changes to diagnostic_event.
+	(event_range::print): Likewise.
+	(class element_event_desc): New.
+	(diagnostic_text_output_format::print_path): Update for changes to
+	diagnostic_event.
+	* diagnostic-path.h (diagnostic_event::get_desc): Replace with...
+	(diagnostic_event::print_desc): ...this.
+	(diagnostic_event::get_desc): Add this back for debugging, without
+	the bool param.
+	* pretty-print.cc (pp_printf_n): New.
+	* pretty-print.h (pp_printf_n): New decl.
+	* selftest-diagnostic-path.h (test_diagnostic_event::get_desc):
+	Convert to...
+	(test_diagnostic_event::print_desc): ...this.
+	* simple-diagnostic-path.cc (simple_diagnostic_event::print_desc):
+	New.
+	(selftest::test_intraprocedural_path): Use debug form of get_desc.
+	* simple-diagnostic-path.h (simple_diagnostic_event::get_desc):
+	Convert to...
+	(simple_diagnostic_event::print_desc): ...this, moving
+	implementation to test_diagnostic_event.
+
+gcc/testsuite/ChangeLog:
+	PR other/116613
+	* gcc.dg/plugin/analyzer_cpython_plugin.c: Convert call outcomes
+	from "get_desc" to print_desc".
+	* gcc.dg/plugin/analyzer_gil_plugin.c: Update for changes to
+	pending_diagnostic vfuncs.
+
+Signed-off-by: David Malcolm <dmalcolm@redhat.com>
 ---
  gcc/analyzer/bounds-checking.cc               | 459 ++++++++++-------
  gcc/analyzer/call-details.cc                  |  11 +-
- gcc/analyzer/call-info.cc                     |  20 +-
+ gcc/analyzer/call-info.cc                     |  19 +-
  gcc/analyzer/call-info.h                      |   6 +-
  gcc/analyzer/checker-event.cc                 | 463 ++++++++----------
  gcc/analyzer/checker-event.h                  |  46 +-
@@ -30,16 +240,14 @@ Subject: [PATCH 7/9] FIXME: WIP on get_desc -> print_desc
  gcc/diagnostic-format-sarif.cc                |   8 +-
  gcc/diagnostic-path.cc                        |  74 ++-
  gcc/diagnostic-path.h                         |   6 +-
- gcc/pretty-print.cc                           |  25 +
+ gcc/pretty-print.cc                           |  26 +
  gcc/pretty-print.h                            |   5 +
  gcc/selftest-diagnostic-path.h                |   4 +-
  gcc/simple-diagnostic-path.cc                 |  10 +-
  gcc/simple-diagnostic-path.h                  |   5 +-
  .../gcc.dg/plugin/analyzer_cpython_plugin.c   |  19 +-
  .../gcc.dg/plugin/analyzer_gil_plugin.c       |  54 +-
- .../gcc.dg/plugin/diagnostic_group_plugin.c   |   3 +-
- .../plugin/diagnostic_plugin_xhtml_format.c   |  10 +-
- 35 files changed, 1868 insertions(+), 1299 deletions(-)
+ 33 files changed, 1860 insertions(+), 1294 deletions(-)
 
 diff --git a/gcc/analyzer/bounds-checking.cc b/gcc/analyzer/bounds-checking.cc
 index f8644addbfdc..e52a63ed9a24 100644
@@ -756,29 +964,28 @@ index a9c613bc1822..00c939399b20 100644
  
    void maybe_add_sarif_properties (sarif_object &result_obj)
 diff --git a/gcc/analyzer/call-info.cc b/gcc/analyzer/call-info.cc
-index 828ece5c7f03..5b4cb6c60b34 100644
+index 828ece5c7f03..6c458c777eaa 100644
 --- a/gcc/analyzer/call-info.cc
 +++ b/gcc/analyzer/call-info.cc
-@@ -75,14 +75,14 @@ custom_edge_info::update_state (program_state *state,
+@@ -75,14 +75,13 @@ custom_edge_info::update_state (program_state *state,
  
  /* class call_info : public custom_edge_info.  */
  
 -/* Implementation of custom_edge_info::print vfunc for call_info:
 -   use get_desc to get a label_text, and print it to PP.  */
 +/* Implementation of custom_edge_info::print vfunc for call_info.  */
-+
-+// FIXME: do we even need this?
  
  void
  call_info::print (pretty_printer *pp) const
  {
 -  label_text desc (get_desc (pp_show_color (pp)));
 -  pp_string (pp, desc.get ());
++  gcc_assert (pp);
 +  print_desc (*pp);
  }
  
  /* Implementation of custom_edge_info::add_events_to_path vfunc for
-@@ -102,9 +102,9 @@ call_info::add_events_to_path (checker_path *emission_path,
+@@ -102,9 +101,9 @@ call_info::add_events_to_path (checker_path *emission_path,
        m_call_info (call_info)
      {}
  
@@ -790,7 +997,7 @@ index 828ece5c7f03..5b4cb6c60b34 100644
      }
  
    private:
-@@ -154,13 +154,13 @@ call_info::call_info (const call_details &cd,
+@@ -154,13 +153,13 @@ call_info::call_info (const call_details &cd,
  
  /* class succeed_or_fail_call_info : public call_info.  */
  
@@ -5078,10 +5285,10 @@ index 734323e6f789..2159c47ce85e 100644
  };
  
 diff --git a/gcc/diagnostic-format-json.cc b/gcc/diagnostic-format-json.cc
-index 48b836768b15..d863712a6e31 100644
+index 7b89ee81d700..fdc55b364164 100644
 --- a/gcc/diagnostic-format-json.cc
 +++ b/gcc/diagnostic-format-json.cc
-@@ -200,6 +200,7 @@ json_from_metadata (const diagnostic_metadata *metadata)
+@@ -249,6 +249,7 @@ json_from_metadata (const diagnostic_metadata *metadata)
  
  static std::unique_ptr<json::array>
  make_json_for_path (diagnostic_context &context,
@@ -5089,7 +5296,7 @@ index 48b836768b15..d863712a6e31 100644
  		    const diagnostic_path *path)
  {
    std::unique_ptr<json::array> path_array = ::make_unique<json::array> ();
-@@ -212,8 +213,9 @@ make_json_for_path (diagnostic_context &context,
+@@ -261,8 +262,9 @@ make_json_for_path (diagnostic_context &context,
  	event_obj->set ("location",
  			json_from_expanded_location (context,
  						     event.get_location ()));
@@ -5101,7 +5308,7 @@ index 48b836768b15..d863712a6e31 100644
        if (const logical_location *logical_loc = event.get_logical_location ())
  	{
  	  label_text name (logical_loc->get_name_for_path_output ());
-@@ -329,7 +331,7 @@ json_output_format::on_report_diagnostic (const diagnostic_info &diagnostic,
+@@ -431,7 +433,7 @@ json_output_format::on_report_diagnostic (const diagnostic_info &diagnostic,
  
    const diagnostic_path *path = richloc->get_path ();
    if (path)
@@ -5111,10 +5318,10 @@ index 48b836768b15..d863712a6e31 100644
    diag_obj->set_bool ("escape-source", richloc->escape_on_output_p ());
  }
 diff --git a/gcc/diagnostic-format-sarif.cc b/gcc/diagnostic-format-sarif.cc
-index 84731a2afce8..47b67c2c1c14 100644
+index a5c6ce290851..9973301cb29a 100644
 --- a/gcc/diagnostic-format-sarif.cc
 +++ b/gcc/diagnostic-format-sarif.cc
-@@ -2089,9 +2089,11 @@ sarif_builder::make_location_object (sarif_location_manager &loc_mgr,
+@@ -2292,9 +2292,11 @@ sarif_builder::make_location_object (sarif_location_manager &loc_mgr,
    set_any_logical_locs_arr (*location_obj, logical_loc);
  
    /* "message" property (SARIF v2.1.0 section 3.28.5).  */
@@ -5130,7 +5337,7 @@ index 84731a2afce8..47b67c2c1c14 100644
    add_any_include_chain (loc_mgr, *location_obj.get (), loc);
  
 diff --git a/gcc/diagnostic-path.cc b/gcc/diagnostic-path.cc
-index 3f7d4fb50156..c0ce8e5f26a0 100644
+index 2c42807cced9..8a6d516ce416 100644
 --- a/gcc/diagnostic-path.cc
 +++ b/gcc/diagnostic-path.cc
 @@ -33,6 +33,7 @@ along with GCC; see the file COPYING3.  If not see
@@ -5306,14 +5513,15 @@ index 7497b0a7199d..3b2048b994d1 100644
  
  /* Abstract base class representing a thread of execution within
 diff --git a/gcc/pretty-print.cc b/gcc/pretty-print.cc
-index c8d78fa73d8c..12c91798f417 100644
+index f18214d33bce..9786eace9da5 100644
 --- a/gcc/pretty-print.cc
 +++ b/gcc/pretty-print.cc
-@@ -2519,6 +2519,31 @@ pp_printf (pretty_printer *pp, const char *msg, ...)
+@@ -2581,6 +2581,32 @@ pp_printf (pretty_printer *pp, const char *msg, ...)
    va_end (ap);
  }
  
-+/* FIXME.  */
++/* Format a message into PP using ngettext to handle
++   singular vs plural.  */
 +
 +void
 +pp_printf_n (pretty_printer *pp,
@@ -5342,7 +5550,7 @@ index c8d78fa73d8c..12c91798f417 100644
  /* Output MESSAGE verbatim into BUFFER.  */
  void
 diff --git a/gcc/pretty-print.h b/gcc/pretty-print.h
-index 96d431876057..d1495367b232 100644
+index 561ebfb27a7b..14a6e9b4f5a1 100644
 --- a/gcc/pretty-print.h
 +++ b/gcc/pretty-print.h
 @@ -587,6 +587,11 @@ extern void pp_separate_with (pretty_printer *, char);
@@ -5552,62 +5760,6 @@ index 1d4d66e0fd2b..77767c88ad74 100644
    }
  
   private:
-diff --git a/gcc/testsuite/gcc.dg/plugin/diagnostic_group_plugin.c b/gcc/testsuite/gcc.dg/plugin/diagnostic_group_plugin.c
-index 2f780338b6e7..7e6d7e1de25e 100644
---- a/gcc/testsuite/gcc.dg/plugin/diagnostic_group_plugin.c
-+++ b/gcc/testsuite/gcc.dg/plugin/diagnostic_group_plugin.c
-@@ -29,6 +29,7 @@
- #include "diagnostic.h"
- #include "diagnostic-format-text.h"
- #include "context.h"
-+#include "make-unique.h"
- 
- int plugin_is_GPL_compatible;
- 
-@@ -229,7 +230,7 @@ plugin_init (struct plugin_name_args *plugin_info,
- 
-   diagnostic_text_starter (global_dc) = test_diagnostic_text_starter;
-   diagnostic_start_span (global_dc) = test_diagnostic_start_span_fn;
--  global_dc->set_output_format (new test_output_format (*global_dc));
-+  global_dc->set_output_format (::make_unique<test_output_format> (*global_dc));
- 
-   pass_info.pass = new pass_test_groups (g);
-   pass_info.reference_pass_name = "*warn_function_noreturn";
-diff --git a/gcc/testsuite/gcc.dg/plugin/diagnostic_plugin_xhtml_format.c b/gcc/testsuite/gcc.dg/plugin/diagnostic_plugin_xhtml_format.c
-index 2ce8cc29660c..0534ff47450c 100644
---- a/gcc/testsuite/gcc.dg/plugin/diagnostic_plugin_xhtml_format.c
-+++ b/gcc/testsuite/gcc.dg/plugin/diagnostic_plugin_xhtml_format.c
-@@ -48,6 +48,7 @@ along with GCC; see the file COPYING3.  If not see
- #include "intl.h"
- #include "gcc-plugin.h"
- #include "plugin-version.h"
-+#include "make-unique.h"
- 
- namespace xml {
- 
-@@ -714,7 +715,7 @@ diagnostic_output_format_init_xhtml (diagnostic_context &context,
-   pp_show_color (fmt->get_printer ()) = false;
-   context.set_show_highlight_colors (false);
- 
--  context.set_output_format (fmt.release ());
-+  context.set_output_format (std::move (fmt));
- }
- 
- /* Populate CONTEXT in preparation for XHTML output to stderr.  */
-@@ -853,9 +854,10 @@ plugin_init (struct plugin_name_args *plugin_info,
-   if (!plugin_default_version_check (version, &gcc_version))
-     return 1;
- 
--  global_dc->set_output_format (new xhtml_stream_output_format (*global_dc,
--								line_table,
--								stderr));
-+  global_dc->set_output_format
-+    (::make_unique<xhtml_stream_output_format> (*global_dc,
-+						line_table,
-+						stderr));
- 
- #if CHECKING_P
-   selftest::xhtml_format_selftests ();
 -- 
 2.26.3
 

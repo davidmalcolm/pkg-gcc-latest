@@ -1,7 +1,7 @@
-From c48ca0fffbbe285b4588f83891dc2e8cfc220b88 Mon Sep 17 00:00:00 2001
+From 6dfb4c2b190bfce69bc479eb2ad0fb9668a26917 Mon Sep 17 00:00:00 2001
 From: David Malcolm <dmalcolm@redhat.com>
 Date: Tue, 24 Sep 2024 16:28:21 -0400
-Subject: [PATCH 8/9] FIXME: WIP on -fdiagnostics-add-output= [PR116613]
+Subject: [PATCH 6/8] FIXME: WIP on -fdiagnostics-add-output= [PR116613]
 
 ---
  gcc/Makefile.in                               |   3 +-
@@ -16,31 +16,29 @@ Subject: [PATCH 8/9] FIXME: WIP on -fdiagnostics-add-output= [PR116613]
  gcc/cp/error.cc                               |  13 +-
  gcc/cp/module.cc                              |   2 +-
  gcc/d/d-diagnostic.cc                         |   2 +-
+ gcc/diagnostic-buffer.h                       |   5 +-
  gcc/diagnostic-format-json.cc                 |   9 +
- gcc/diagnostic-format-sarif.cc                | 123 +++-
+ gcc/diagnostic-format-sarif.cc                | 109 ++-
  gcc/diagnostic-format-sarif.h                 |  11 +
- gcc/diagnostic-format-text.cc                 |  34 +
- gcc/diagnostic-format-text.h                  |  24 +-
- gcc/diagnostic-format.h                       |  18 +-
+ gcc/diagnostic-format-text.cc                 |  27 +
+ gcc/diagnostic-format-text.h                  |  21 +-
+ gcc/diagnostic-format.h                       |  14 +-
  gcc/diagnostic-global-context.cc              |   8 +-
  gcc/diagnostic-output-file.h                  |  27 +-
  gcc/diagnostic-path.cc                        |   2 +-
  gcc/diagnostic-show-locus.cc                  |  28 +-
- gcc/diagnostic.cc                             | 172 ++++-
- gcc/diagnostic.h                              |  47 +-
+ gcc/diagnostic.cc                             | 296 ++++++--
+ gcc/diagnostic.h                              |  46 +-
  gcc/doc/invoke.texi                           |  91 ++-
- gcc/fortran/error.cc                          |  14 +-
+ gcc/fortran/error.cc                          |   4 +-
  gcc/gcc.cc                                    |   5 +
  gcc/jit/dummy-frontend.cc                     |  60 +-
  gcc/jit/jit-playback.cc                       |   8 +-
  gcc/jit/jit-playback.h                        |   2 +-
- gcc/opts-diagnostic.cc                        | 670 ++++++++++++++++++
+ gcc/opts-diagnostic.cc                        | 671 ++++++++++++++++++
  gcc/opts-diagnostic.h                         |   6 +
  gcc/opts-global.cc                            |   3 +-
  gcc/opts.cc                                   |   8 +-
- gcc/pretty-print-format-impl.h                |   8 +-
- gcc/pretty-print.cc                           |  45 +-
- gcc/pretty-print.h                            |   8 +-
  gcc/selftest-diagnostic.cc                    |   9 +-
  gcc/selftest-run-tests.cc                     |   1 +
  gcc/selftest.h                                |   1 +
@@ -57,7 +55,7 @@ Subject: [PATCH 8/9] FIXME: WIP on -fdiagnostics-add-output= [PR116613]
  gcc/tree-diagnostic.cc                        |   2 +-
  gcc/tree-diagnostic.h                         |   2 +-
  gcc/tree.cc                                   |   4 +-
- 53 files changed, 1460 insertions(+), 207 deletions(-)
+ 51 files changed, 1471 insertions(+), 226 deletions(-)
  create mode 100644 gcc/opts-diagnostic.cc
  create mode 100644 gcc/testsuite/gcc.dg/sarif-output/add-output-sarif-defaults.c
  create mode 100644 gcc/testsuite/gcc.dg/sarif-output/multiple-outputs.c
@@ -258,7 +256,7 @@ index 65f70c595cf8..757e3b56aeda 100644
  
  /* Dump an '@module' name suffix for DECL, if any.  */
 diff --git a/gcc/cp/module.cc b/gcc/cp/module.cc
-index 65b37b4b5544..3383599cce30 100644
+index 2dc59ce8a120..a03a01bc1840 100644
 --- a/gcc/cp/module.cc
 +++ b/gcc/cp/module.cc
 @@ -4695,7 +4695,7 @@ noisy_p ()
@@ -283,11 +281,36 @@ index d584d2ac2b23..f8c32ae918de 100644
        pp_format_verbatim (pp, &text);
        pp_newline_and_flush (pp);
      }
+diff --git a/gcc/diagnostic-buffer.h b/gcc/diagnostic-buffer.h
+index deb933a87630..07ccebf9357f 100644
+--- a/gcc/diagnostic-buffer.h
++++ b/gcc/diagnostic-buffer.h
+@@ -59,6 +59,7 @@ class diagnostic_buffer
+   friend class diagnostic_context;
+ 
+   diagnostic_buffer (diagnostic_context &ctxt);
++  ~diagnostic_buffer ();
+ 
+   void dump (FILE *out, int indent) const;
+   void DEBUG_FUNCTION dump () const { dump (stderr, 0); }
+@@ -73,10 +74,10 @@ class diagnostic_buffer
+   void move_to (diagnostic_buffer &dest);
+ 
+  private:
+-  void ensure_per_format_buffer ();
++  void ensure_per_format_buffers ();
+ 
+   diagnostic_context &m_ctxt;
+-  std::unique_ptr<diagnostic_per_format_buffer> m_per_format_buffer;
++  auto_vec<diagnostic_per_format_buffer *> *m_per_format_buffers;
+ 
+   /* The number of buffered diagnostics of each kind.  */
+   diagnostic_counters m_diagnostic_counters;
 diff --git a/gcc/diagnostic-format-json.cc b/gcc/diagnostic-format-json.cc
-index d863712a6e31..8db7d893c3d3 100644
+index fdc55b364164..17b1ef91d3d0 100644
 --- a/gcc/diagnostic-format-json.cc
 +++ b/gcc/diagnostic-format-json.cc
-@@ -58,6 +58,15 @@ public:
+@@ -104,6 +104,15 @@ public:
    {
      /* No-op.  */
    }
@@ -304,10 +327,10 @@ index d863712a6e31..8db7d893c3d3 100644
  protected:
    json_output_format (diagnostic_context &context,
 diff --git a/gcc/diagnostic-format-sarif.cc b/gcc/diagnostic-format-sarif.cc
-index 47b67c2c1c14..302050998344 100644
+index 9973301cb29a..6feba8a267c9 100644
 --- a/gcc/diagnostic-format-sarif.cc
 +++ b/gcc/diagnostic-format-sarif.cc
-@@ -37,6 +37,7 @@ along with GCC; see the file COPYING3.  If not see
+@@ -38,6 +38,7 @@ along with GCC; see the file COPYING3.  If not see
  #include "diagnostic-diagram.h"
  #include "text-art/canvas.h"
  #include "diagnostic-format-sarif.h"
@@ -315,9 +338,9 @@ index 47b67c2c1c14..302050998344 100644
  #include "ordered-hash-map.h"
  #include "sbitmap.h"
  #include "make-unique.h"
-@@ -643,12 +644,18 @@ class sarif_builder
- {
- public:
+@@ -680,12 +681,18 @@ public:
+   friend class diagnostic_sarif_format_buffer;
+ 
    sarif_builder (diagnostic_context &context,
 +		 pretty_printer &printer,
  		 const line_maps *line_maps,
@@ -332,9 +355,9 @@ index 47b67c2c1c14..302050998344 100644
 +  }
 +
    void on_report_diagnostic (const diagnostic_info &diagnostic,
- 			     diagnostic_t orig_diag_kind);
-   void emit_diagram (const diagnostic_diagram &diagram);
-@@ -1480,12 +1487,13 @@ sarif_thread_flow::add_location ()
+ 			     diagnostic_t orig_diag_kind,
+ 			     diagnostic_sarif_format_buffer *buffer);
+@@ -1540,12 +1547,13 @@ sarif_thread_flow::add_location ()
  /* sarif_builder's ctor.  */
  
  sarif_builder::sarif_builder (diagnostic_context &context,
@@ -349,7 +372,7 @@ index 47b67c2c1c14..302050998344 100644
    m_line_maps (line_maps),
    m_token_printer (*this),
    m_version (version),
-@@ -1920,11 +1928,13 @@ sarif_builder::make_location_object (sarif_location_manager &loc_mgr,
+@@ -2123,11 +2131,13 @@ sarif_builder::make_location_object (sarif_location_manager &loc_mgr,
  
        diagnostic_source_print_policy source_policy (dc);
        dc.set_escape_format (m_escape_format);
@@ -366,16 +389,10 @@ index 47b67c2c1c14..302050998344 100644
  
        diagnostic_finish (&dc);
  
-@@ -3170,6 +3180,34 @@ public:
-     gcc_assert (!pending_result);
+@@ -3423,6 +3433,28 @@ public:
+     m_buffer = buffer;
    }
  
-+  void dump (FILE *out, int indent) const override
-+  {
-+    fprintf (out, "%*ssarif_output_format\n", indent, "");
-+    diagnostic_output_format::dump (out, indent);
-+  }
-+
 +  bool follows_reference_printer_p () const final override
 +  {
 +    return false;
@@ -401,38 +418,24 @@ index 47b67c2c1c14..302050998344 100644
    void on_begin_group () final override
    {
      /* No-op,  */
-@@ -3202,7 +3240,8 @@ protected:
+@@ -3458,7 +3490,8 @@ protected:
  		       bool formatted,
  		       enum sarif_version version)
    : diagnostic_output_format (context),
--    m_builder (context, line_maps, main_input_filename_, formatted, version)
+-    m_builder (context, line_maps, main_input_filename_, formatted, version),
 +    m_builder (context, *get_printer (), line_maps, main_input_filename_,
-+	       formatted, version)
++	       formatted, version),
+     m_buffer (nullptr)
    {}
  
-   sarif_builder m_builder;
-@@ -3254,6 +3293,13 @@ public:
-   {
-     m_builder.flush_to_file (m_output_file.get_open_file ());
-   }
-+  void dump (FILE *out, int indent) const override
-+  {
-+    fprintf (out, "%*ssarif_file_output_format: %s\n",
-+	     indent, "",
-+	     m_output_file.get_filename ());
-+    diagnostic_output_format::dump (out, indent);
-+  }
-   bool machine_readable_stderr_p () const final override
-   {
-     return false;
-@@ -3392,12 +3438,10 @@ diagnostic_output_format_init_sarif (diagnostic_context &context,
-   /* Override callbacks.  */
-   context.set_ice_handler_callback (sarif_ice_handler);
+@@ -3654,12 +3687,11 @@ diagnostic_output_format_init_sarif (diagnostic_context &context,
+   /* Suppress normal textual path output.  */
+   context.set_path_format (DPF_NONE);
  
--  /* Don't colorize the text.  */
--  pp_show_color (fmt->get_printer ()) = false;
 +  fmt->update_printer ();
 +
+   /* Don't colorize the text.  */
+-  pp_show_color (fmt->get_printer ()) = false;
    context.set_show_highlight_colors (false);
  
 -  context.m_printer->set_token_printer
@@ -440,7 +443,7 @@ index 47b67c2c1c14..302050998344 100644
    context.set_output_format (std::move (fmt));
  }
  
-@@ -3421,25 +3465,19 @@ diagnostic_output_format_init_sarif_stderr (diagnostic_context &context,
+@@ -3683,26 +3715,20 @@ diagnostic_output_format_init_sarif_stderr (diagnostic_context &context,
  						stderr));
  }
  
@@ -463,17 +466,18 @@ index 47b67c2c1c14..302050998344 100644
    if (!base_file_name)
      {
        rich_location richloc (line_maps, UNKNOWN_LOCATION);
-       context.emit_diagnostic (DK_ERROR, richloc, nullptr, 0,
- 			       "unable to determine filename for SARIF output");
+       context.emit_diagnostic_with_group
+ 	(DK_ERROR, richloc, nullptr, 0,
+ 	 "unable to determine filename for SARIF output");
 -      return;
 +      return diagnostic_output_file ();
      }
  
    label_text filename = label_text::take (concat (base_file_name,
-@@ -3452,9 +3490,29 @@ diagnostic_output_format_init_sarif_file (diagnostic_context &context,
-       context.emit_diagnostic (DK_ERROR, richloc, nullptr, 0,
- 			       "unable to open %qs for SARIF output: %m",
- 			       filename.get ());
+@@ -3716,9 +3742,29 @@ diagnostic_output_format_init_sarif_file (diagnostic_context &context,
+ 	(DK_ERROR, richloc, nullptr, 0,
+ 	 "unable to open %qs for SARIF output: %m",
+ 	 filename.get ());
 -      return;
 +      return diagnostic_output_file ();
      }
@@ -502,7 +506,7 @@ index 47b67c2c1c14..302050998344 100644
    diagnostic_output_format_init_sarif
      (context,
       ::make_unique<sarif_file_output_format> (context,
-@@ -3486,6 +3544,24 @@ diagnostic_output_format_init_sarif_stream (diagnostic_context &context,
+@@ -3750,6 +3796,24 @@ diagnostic_output_format_init_sarif_stream (diagnostic_context &context,
  						stream));
  }
  
@@ -527,7 +531,7 @@ index 47b67c2c1c14..302050998344 100644
  #if CHECKING_P
  
  namespace selftest {
-@@ -3555,8 +3631,9 @@ test_make_location_object (const line_table_case &case_,
+@@ -3822,8 +3886,9 @@ test_make_location_object (const line_table_case &case_,
      return;
  
    test_diagnostic_context dc;
@@ -569,27 +573,20 @@ index 5f8751aa3505..f149d2983a42 100644
  /* Concrete subclass of json::object for SARIF property bags
     (SARIF v2.1.0 section 3.8).  */
 diff --git a/gcc/diagnostic-format-text.cc b/gcc/diagnostic-format-text.cc
-index 4f599437a409..9b3e25e87be5 100644
+index c23ac6c505d8..567ad05fc589 100644
 --- a/gcc/diagnostic-format-text.cc
 +++ b/gcc/diagnostic-format-text.cc
-@@ -70,6 +70,16 @@ diagnostic_text_output_format::~diagnostic_text_output_format ()
-     }
- }
- 
-+void
-+diagnostic_text_output_format::dump (FILE *out, int indent) const
-+{
-+  fprintf (out, "%*sdiagnostic_text_output_format\n", indent, "");
+@@ -160,6 +160,9 @@ void
+ diagnostic_text_output_format::dump (FILE *out, int indent) const
+ {
+   fprintf (out, "%*sdiagnostic_text_output_format\n", indent, "");
 +  fprintf (out, "%*sm_follows_reference_printer: %s\n",
 +	   indent, "",
 +	   m_follows_reference_printer ? "true" : "false");
-+  diagnostic_output_format::dump (out, indent);
-+}
-+
- /* Implementation of diagnostic_output_format::on_report_diagnostic vfunc
-    for GCC's standard textual output.  */
- 
-@@ -191,6 +201,30 @@ diagnostic_text_output_format::append_note (location_t location,
+   diagnostic_output_format::dump (out, indent);
+   fprintf (out, "%*ssaved_output_buffer:\n", indent + 2, "");
+   if (m_saved_output_buffer)
+@@ -315,6 +318,30 @@ diagnostic_text_output_format::append_note (location_t location,
    va_end (ap);
  }
  
@@ -621,10 +618,10 @@ index 4f599437a409..9b3e25e87be5 100644
  
     For example, if the diagnostic metadata associates it with CWE-119,
 diff --git a/gcc/diagnostic-format-text.h b/gcc/diagnostic-format-text.h
-index 2e57e27c739d..79ff2883e942 100644
+index b43501eaa4ab..6ddb47dfb31c 100644
 --- a/gcc/diagnostic-format-text.h
 +++ b/gcc/diagnostic-format-text.h
-@@ -32,23 +32,31 @@ along with GCC; see the file COPYING3.  If not see
+@@ -32,12 +32,14 @@ along with GCC; see the file COPYING3.  If not see
  class diagnostic_text_output_format : public diagnostic_output_format
  {
  public:
@@ -632,6 +629,7 @@ index 2e57e27c739d..79ff2883e942 100644
 +  diagnostic_text_output_format (diagnostic_context &context,
 +				 bool follows_reference_printer = false)
    : diagnostic_output_format (context),
+     m_saved_output_buffer (nullptr),
      m_column_policy (context),
      m_last_module (nullptr),
 -    m_includes_seen (nullptr)
@@ -639,11 +637,8 @@ index 2e57e27c739d..79ff2883e942 100644
 +    m_follows_reference_printer (follows_reference_printer)
    {}
    ~diagnostic_text_output_format ();
-+
-+  void dump (FILE *out, int indent) const override;
-+
-   void on_begin_group () override {}
-   void on_end_group () override {}
+ 
+@@ -52,11 +54,14 @@ public:
    void on_report_diagnostic (const diagnostic_info &,
  			     diagnostic_t orig_diag_kind) override;
    void on_diagram (const diagnostic_diagram &diagram) override;
@@ -659,7 +654,7 @@ index 2e57e27c739d..79ff2883e942 100644
  
    /* Helpers for writing lang-specific starters/finalizers for text output.  */
    char *build_prefix (const diagnostic_info &) const;
-@@ -69,7 +77,7 @@ public:
+@@ -77,7 +82,7 @@ public:
    }
    diagnostic_location_print_policy get_location_print_policy () const;
  
@@ -668,7 +663,7 @@ index 2e57e27c739d..79ff2883e942 100644
    void print_any_cwe (const diagnostic_info &diagnostic);
    void print_any_rules (const diagnostic_info &diagnostic);
    void print_option_information (const diagnostic_info &diagnostic,
-@@ -87,6 +95,14 @@ private:
+@@ -98,6 +103,14 @@ private:
    /* Include files that report_current_module has already listed the
       include path for.  */
    hash_set<location_t, false, location_hash> *m_includes_seen;
@@ -684,19 +679,10 @@ index 2e57e27c739d..79ff2883e942 100644
  
  #endif /* ! GCC_DIAGNOSTIC_FORMAT_TEXT_H */
 diff --git a/gcc/diagnostic-format.h b/gcc/diagnostic-format.h
-index 1fd3fe0c64e8..68c46e124616 100644
+index a38d177ce8d1..00e29d11dd00 100644
 --- a/gcc/diagnostic-format.h
 +++ b/gcc/diagnostic-format.h
-@@ -32,6 +32,8 @@ class diagnostic_output_format
- public:
-   virtual ~diagnostic_output_format () {}
- 
-+  virtual void dump (FILE *out, int indent) const;
-+
-   virtual void on_begin_group () = 0;
-   virtual void on_end_group () = 0;
- 
-@@ -43,21 +45,33 @@ public:
+@@ -58,9 +58,16 @@ public:
    virtual void on_diagram (const diagnostic_diagram &diagram) = 0;
    virtual void after_diagnostic (const diagnostic_info &) = 0;
    virtual bool machine_readable_stderr_p () const = 0;
@@ -714,11 +700,8 @@ index 1fd3fe0c64e8..68c46e124616 100644
  
    text_art::theme *get_diagram_theme () const
    {
-     return m_context.get_diagram_theme ();
-   }
+@@ -71,10 +78,13 @@ public:
  
-+  void DEBUG_FUNCTION dump () const { dump (stderr, 0); }
-+
  protected:
    diagnostic_output_format (diagnostic_context &context)
 -  : m_context (context)
@@ -809,7 +792,7 @@ index f0ae5e1915ec..6e7b41737cd4 100644
    operator bool () const { return m_outf != nullptr; }
    FILE *get_open_file () const { return m_outf; }
 diff --git a/gcc/diagnostic-path.cc b/gcc/diagnostic-path.cc
-index c0ce8e5f26a0..a660b8319ba8 100644
+index 8a6d516ce416..2b1a093f3f22 100644
 --- a/gcc/diagnostic-path.cc
 +++ b/gcc/diagnostic-path.cc
 @@ -1297,7 +1297,7 @@ test_interprocedural_path_1 (pretty_printer *event_pp)
@@ -925,27 +908,27 @@ index 79499dc549d3..a2a4b047ff9c 100644
  		  "TEST PREFIX:      | 12345678901234567890123456789012345678901234567890\n"
  		  "TEST PREFIX:    1 | foo = bar.field;\n"
 diff --git a/gcc/diagnostic.cc b/gcc/diagnostic.cc
-index 24eb46c02331..030b5d28bf6c 100644
+index f1cef0b01a88..c4c238e4c0c5 100644
 --- a/gcc/diagnostic.cc
 +++ b/gcc/diagnostic.cc
-@@ -49,6 +49,7 @@ along with GCC; see the file COPYING3.  If not see
- #include "text-art/theme.h"
+@@ -50,6 +50,7 @@ along with GCC; see the file COPYING3.  If not see
  #include "pretty-print-urlifier.h"
  #include "logical-location.h"
+ #include "diagnostic-buffer.h"
 +#include "make-unique.h"
  
  #ifdef HAVE_TERMIOS_H
  # include <termios.h>
-@@ -117,7 +118,7 @@ diagnostic_set_caret_max_width (diagnostic_context *context, int value)
+@@ -118,7 +119,7 @@ diagnostic_set_caret_max_width (diagnostic_context *context, int value)
  {
    /* One minus to account for the leading empty space.  */
    value = value ? value - 1 
 -    : (isatty (fileno (pp_buffer (context->m_printer)->m_stream))
 +    : (isatty (fileno (pp_buffer (context->get_reference_printer ())->m_stream))
-        ? get_terminal_width () - 1: INT_MAX);
+        ? get_terminal_width () - 1 : INT_MAX);
    
    if (value <= 0) 
-@@ -222,8 +223,7 @@ diagnostic_context::initialize (int n_opts)
+@@ -223,8 +224,7 @@ diagnostic_context::initialize (int n_opts)
  {
    /* Allocate a basic pretty-printer.  Clients will replace this a
       much more elaborated pretty-printer if they wish.  */
@@ -954,8 +937,8 @@ index 24eb46c02331..030b5d28bf6c 100644
 +  m_reference_printer = ::make_unique<pretty_printer> ().release ();
  
    m_file_cache = new file_cache ();
-   memset (m_diagnostic_count, 0, sizeof m_diagnostic_count);
-@@ -231,7 +231,7 @@ diagnostic_context::initialize (int n_opts)
+   m_diagnostic_counters.clear ();
+@@ -232,7 +232,7 @@ diagnostic_context::initialize (int n_opts)
    m_n_opts = n_opts;
    m_option_classifier.init (n_opts);
    m_source_printing.enabled = false;
@@ -964,16 +947,16 @@ index 24eb46c02331..030b5d28bf6c 100644
    for (int i = 0; i < rich_location::STATICALLY_ALLOCATED_RANGES; i++)
      m_source_printing.caret_chars[i] = '^';
    m_show_cwe = false;
-@@ -282,7 +282,7 @@ diagnostic_context::initialize (int n_opts)
+@@ -283,7 +283,7 @@ diagnostic_context::initialize (int n_opts)
    m_edit_context_ptr = nullptr;
    m_diagnostic_groups.m_nesting_depth = 0;
    m_diagnostic_groups.m_emission_count = 0;
 -  m_output_format = new diagnostic_text_output_format (*this);
 +  m_output_sinks.safe_push (new diagnostic_text_output_format (*this, true));
    m_set_locations_cb = nullptr;
-   m_ice_handler_cb = nullptr;
    m_client_data_hooks = nullptr;
-@@ -325,8 +325,12 @@ diagnostic_context::color_init (int value)
+   m_diagrams.m_theme = nullptr;
+@@ -326,8 +326,12 @@ diagnostic_context::color_init (int value)
        else
  	value = DIAGNOSTICS_COLOR_DEFAULT;
      }
@@ -987,7 +970,7 @@ index 24eb46c02331..030b5d28bf6c 100644
  }
  
  /* Initialize URL support within this context based on VALUE,
-@@ -353,8 +357,12 @@ diagnostic_context::urls_init (int value)
+@@ -354,8 +358,12 @@ diagnostic_context::urls_init (int value)
  	value = DIAGNOSTICS_URLS_DEFAULT;
      }
  
@@ -1001,7 +984,7 @@ index 24eb46c02331..030b5d28bf6c 100644
  }
  
  /* Create the file_cache, if not already created, and tell it how to
-@@ -374,14 +382,14 @@ diagnostic_context::finish ()
+@@ -375,7 +383,7 @@ diagnostic_context::finish ()
  {
    /* We might be handling a fatal error.
       Close any active diagnostic groups, which may trigger flushing
@@ -1009,6 +992,8 @@ index 24eb46c02331..030b5d28bf6c 100644
 +     sinks.  */
    while (m_diagnostic_groups.m_nesting_depth > 0)
      end_group ();
+ 
+@@ -383,8 +391,8 @@ diagnostic_context::finish ()
  
    /* Clean ups.  */
  
@@ -1019,7 +1004,7 @@ index 24eb46c02331..030b5d28bf6c 100644
  
    if (m_diagrams.m_theme)
      {
-@@ -394,11 +402,8 @@ diagnostic_context::finish ()
+@@ -397,11 +405,8 @@ diagnostic_context::finish ()
  
    m_option_classifier.fini ();
  
@@ -1033,16 +1018,14 @@ index 24eb46c02331..030b5d28bf6c 100644
  
    if (m_edit_context_ptr)
      {
-@@ -419,6 +424,21 @@ diagnostic_context::finish ()
-   m_original_argv = nullptr;
- }
- 
-+/* Dump state of this diagnostic_context to OUT, for debugging.  */
-+
-+void
-+diagnostic_context::dump (FILE *out) const
-+{
-+  fprintf (out, "diagnostic_context:\n");
+@@ -429,10 +434,13 @@ diagnostic_context::dump (FILE *out) const
+ {
+   fprintf (out, "diagnostic_context:\n");
+   m_diagnostic_counters.dump (out, 2);
+-  fprintf (out, "  output format:\n");
+-  m_output_format->dump (out, 4);
+-  fprintf (out, "  printer:\n");
+-  m_printer->dump (out, 4);
 +  fprintf (out, "  reference printer:\n");
 +  m_reference_printer->dump (out, 4);
 +  for (unsigned i = 0; i < m_output_sinks.length (); ++i)
@@ -1050,12 +1033,10 @@ index 24eb46c02331..030b5d28bf6c 100644
 +      fprintf (out, "  sink %i:\n", i);
 +      m_output_sinks[i]->dump (out, 4);
 +    }
-+}
-+
- /* Return true if sufficiently severe diagnostics have been seen that
-    we ought to exit with a non-zero exit code.  */
- 
-@@ -436,9 +456,23 @@ void
+   fprintf (out, "  diagnostic buffer:\n");
+   if (m_diagnostic_buffer)
+     m_diagnostic_buffer->dump (out, 4);
+@@ -457,9 +465,23 @@ void
  diagnostic_context::
  set_output_format (std::unique_ptr<diagnostic_output_format> output_format)
  {
@@ -1082,7 +1063,7 @@ index 24eb46c02331..030b5d28bf6c 100644
  }
  
  void
-@@ -480,6 +514,53 @@ diagnostic_context::set_urlifier (std::unique_ptr<urlifier> urlifier)
+@@ -502,6 +524,53 @@ diagnostic_context::set_urlifier (std::unique_ptr<urlifier> urlifier)
    m_urlifier = urlifier.release ();
  }
  
@@ -1136,7 +1117,7 @@ index 24eb46c02331..030b5d28bf6c 100644
  void
  diagnostic_context::create_edit_context ()
  {
-@@ -1211,8 +1292,6 @@ diagnostic_context::report_diagnostic (diagnostic_info *diagnostic)
+@@ -1234,8 +1303,6 @@ diagnostic_context::report_diagnostic (diagnostic_info *diagnostic)
  {
    diagnostic_t orig_diag_kind = diagnostic->kind;
  
@@ -1145,7 +1126,7 @@ index 24eb46c02331..030b5d28bf6c 100644
    /* Every call to report_diagnostic should be within a
       begin_group/end_group pair so that output formats can reliably
       flush diagnostics with on_end_group when the topmost group is ended.  */
-@@ -1246,7 +1325,7 @@ diagnostic_context::report_diagnostic (diagnostic_info *diagnostic)
+@@ -1269,7 +1336,7 @@ diagnostic_context::report_diagnostic (diagnostic_info *diagnostic)
  	 through.  Don't do this more than once.  */
        if ((diagnostic->kind == DK_ICE || diagnostic->kind == DK_ICE_NOBT)
  	  && m_lock == 1)
@@ -1154,7 +1135,7 @@ index 24eb46c02331..030b5d28bf6c 100644
        else
  	error_recursion ();
      }
-@@ -1308,13 +1387,25 @@ diagnostic_context::report_diagnostic (diagnostic_info *diagnostic)
+@@ -1341,20 +1408,38 @@ diagnostic_context::report_diagnostic (diagnostic_info *diagnostic)
  
    /* Is this the initial diagnostic within the stack of groups?  */
    if (m_diagnostic_groups.m_emission_count == 0)
@@ -1163,14 +1144,34 @@ index 24eb46c02331..030b5d28bf6c 100644
 +      sink->on_begin_group ();
    m_diagnostic_groups.m_emission_count++;
  
+-  /* Run phases 1 and 2 of formatting the message.
+-     In particular, some format codes may have side-effects here which need to
+-     happen before sending the diagnostic to the output format.
+-
+-     For example, Fortran's %C and %L formatting codes populate the
+-     rich_location.  */
 -  pp_format (m_printer, &diagnostic->message);
+-
 -  /* Call vfunc in the output format.  This is responsible for
 -     phase 3 of formatting, and for printing the result.  */
 -  m_output_format->on_report_diagnostic (*diagnostic, orig_diag_kind);
 +  va_list *orig_args = diagnostic->message.m_args_ptr;
 +  for (auto sink : m_output_sinks)
 +    {
-+      /* Make a duplicate of the varargs for each call to pp_format,
++      /* Formatting the message is done per-output-format,
++	 so that each output format gets its own set of pp_token_lists
++	 to work with.
++
++	 Run phases 1 and 2 of formatting the message before calling
++	 the format's on_report_diagnostic.
++	 In particular, some format codes may have side-effects here which
++	 need to happen before sending the diagnostic to the output format.
++	 For example, Fortran's %C and %L formatting codes populate the
++	 rich_location.
++	 Such side-effects must be idempotent, since they are run per
++	 output-format.
++
++	 Make a duplicate of the varargs for each call to pp_format,
 +	 so that each has its own set to consume.  */
 +      va_list copied_args;
 +      va_copy (copied_args, *orig_args);
@@ -1185,7 +1186,7 @@ index 24eb46c02331..030b5d28bf6c 100644
  
    switch (m_extra_output_kind)
      {
-@@ -1322,17 +1413,17 @@ diagnostic_context::report_diagnostic (diagnostic_info *diagnostic)
+@@ -1362,17 +1447,17 @@ diagnostic_context::report_diagnostic (diagnostic_info *diagnostic)
        break;
      case EXTRA_DIAGNOSTIC_OUTPUT_fixits_v1:
        print_parseable_fixits (get_file_cache (),
@@ -1206,18 +1207,18 @@ index 24eb46c02331..030b5d28bf6c 100644
 +      pp_flush (m_reference_printer);
        break;
      }
-   diagnostic_action_after_output (this, diagnostic->kind);
-@@ -1344,7 +1435,8 @@ diagnostic_context::report_diagnostic (diagnostic_info *diagnostic)
- 
+   if (m_diagnostic_buffer == nullptr
+@@ -1389,7 +1474,8 @@ diagnostic_context::report_diagnostic (diagnostic_info *diagnostic)
    m_lock--;
  
--  m_output_format->after_diagnostic (*diagnostic);
-+  for (auto sink : m_output_sinks)
-+    sink->after_diagnostic (*diagnostic);
+   if (!m_diagnostic_buffer)
+-    m_output_format->after_diagnostic (*diagnostic);
++    for (auto sink : m_output_sinks)
++      sink->after_diagnostic (*diagnostic);
  
    return true;
  }
-@@ -1466,8 +1558,8 @@ diagnostic_context::emit_diagram (const diagnostic_diagram &diagram)
+@@ -1511,8 +1597,8 @@ diagnostic_context::emit_diagram (const diagnostic_diagram &diagram)
    if (m_diagrams.m_theme == nullptr)
      return;
  
@@ -1228,7 +1229,7 @@ index 24eb46c02331..030b5d28bf6c 100644
  }
  
  /* Inform the user that an error occurred while trying to report some
-@@ -1479,7 +1571,7 @@ void
+@@ -1524,7 +1610,7 @@ void
  diagnostic_context::error_recursion ()
  {
    if (m_lock < 3)
@@ -1237,7 +1238,7 @@ index 24eb46c02331..030b5d28bf6c 100644
  
    fnotice (stderr,
  	   "internal compiler error: error reporting routines re-entered.\n");
-@@ -1509,7 +1601,7 @@ fancy_abort (const char *file, int line, const char *function)
+@@ -1554,7 +1640,7 @@ fancy_abort (const char *file, int line, const char *function)
       initialized yet, or might be in use by another thread).
       Handle such cases as gracefully as possible by falling back to a
       minimal abort handler that only relies on i18n.  */
@@ -1246,7 +1247,7 @@ index 24eb46c02331..030b5d28bf6c 100644
      {
        /* Print the error message.  */
        fnotice (stderr, diagnostic_kind_text[DK_ICE]);
-@@ -1552,11 +1644,19 @@ diagnostic_context::end_group ()
+@@ -1597,15 +1683,17 @@ diagnostic_context::end_group ()
  	 If any diagnostics were emitted, give the context a chance
  	 to do something.  */
        if (m_diagnostic_groups.m_emission_count > 0)
@@ -1257,21 +1258,198 @@ index 24eb46c02331..030b5d28bf6c 100644
      }
  }
  
-+void
+ void
+-diagnostic_output_format::dump (FILE *, int) const
 +diagnostic_output_format::dump (FILE *out, int indent) const
-+{
+ {
+-  /* No-op for now.  */
 +  fprintf (out, "%*sprinter:\n", indent, "");
 +  m_printer->dump (out, indent + 2);
+ }
+ 
+ /* Set the output format for CONTEXT to FORMAT, using BASE_FILE_NAME for
+@@ -1713,15 +1801,22 @@ diagnostic_context::set_diagnostic_buffer (diagnostic_buffer *buffer)
+ 
+   m_diagnostic_buffer = buffer;
+ 
+-  gcc_assert (m_output_format);
+   if (buffer)
+     {
+-      buffer->ensure_per_format_buffer ();
+-      gcc_assert (buffer->m_per_format_buffer);
+-      m_output_format->set_buffer (buffer->m_per_format_buffer.get ());
++      buffer->ensure_per_format_buffers ();
++      gcc_assert (buffer->m_per_format_buffers);
++      gcc_assert (buffer->m_per_format_buffers->length ()
++		  == m_output_sinks.length ());
++      for (unsigned idx = 0; idx < m_output_sinks.length (); ++idx)
++	{
++	  auto sink = m_output_sinks[idx];
++	  auto per_format_buffer = (*buffer->m_per_format_buffers)[idx];
++	  sink->set_buffer (per_format_buffer);
++	}
+     }
+   else
+-    m_output_format->set_buffer (nullptr);
++    for (auto sink : m_output_sinks)
++      sink->set_buffer (nullptr);
+ }
+ 
+ /* Clear BUFFER without flushing it.  */
+@@ -1729,8 +1824,10 @@ diagnostic_context::set_diagnostic_buffer (diagnostic_buffer *buffer)
+ void
+ diagnostic_context::clear_diagnostic_buffer (diagnostic_buffer &buffer)
+ {
+-  if (buffer.m_per_format_buffer)
+-    buffer.m_per_format_buffer->clear ();
++  if (buffer.m_per_format_buffers)
++    for (auto per_format_buffer : *buffer.m_per_format_buffers)
++      per_format_buffer->clear ();
++
+   buffer.m_diagnostic_counters.clear ();
+ 
+   /* We need to reset last_location, otherwise we may skip caret lines
+@@ -1746,8 +1843,9 @@ diagnostic_context::flush_diagnostic_buffer (diagnostic_buffer &buffer)
+   bool had_errors
+     = (buffer.m_diagnostic_counters.m_count_for_kind[DK_ERROR] > 0
+        || buffer.m_diagnostic_counters.m_count_for_kind[DK_WERROR] > 0);
+-  if (buffer.m_per_format_buffer)
+-    buffer.m_per_format_buffer->flush ();
++  if (buffer.m_per_format_buffers)
++    for (auto per_format_buffer : *buffer.m_per_format_buffers)
++      per_format_buffer->flush ();
+   buffer.m_diagnostic_counters.move_to (m_diagnostic_counters);
+ 
+   action_after_output (had_errors ? DK_ERROR : DK_WARNING);
+@@ -1796,17 +1894,29 @@ diagnostic_counters::clear ()
+ /* class diagnostic_buffer.  */
+ 
+ diagnostic_buffer::diagnostic_buffer (diagnostic_context &ctxt)
+-: m_ctxt (ctxt)
++: m_ctxt (ctxt),
++  m_per_format_buffers (nullptr)
+ {
+ }
+ 
++diagnostic_buffer::~diagnostic_buffer ()
++{
++  if (m_per_format_buffers)
++    {
++      for (auto iter : *m_per_format_buffers)
++	delete iter;
++      delete m_per_format_buffers;
++    }
 +}
 +
- /* Set the output format for CONTEXT to FORMAT, using BASE_FILE_NAME for
-    file-based output formats.  */
+ void
+ diagnostic_buffer::dump (FILE *out, int indent) const
+ {
+-  fprintf (out, "%*sm_per_format_buffer:\n", indent, "");
+   m_diagnostic_counters.dump (out, indent + 2);
+-  if (m_per_format_buffer)
+-    m_per_format_buffer->dump (out, indent + 2);
++  fprintf (out, "%*sm_per_format_buffers:\n", indent, "");
++  if (m_per_format_buffers)
++    for (auto per_format_buffer : *m_per_format_buffers)
++      per_format_buffer->dump (out, indent + 2);
+   else
+     fprintf (out, "%*s(none)\n", indent + 2, "");
+ }
+@@ -1814,33 +1924,67 @@ diagnostic_buffer::dump (FILE *out, int indent) const
+ bool
+ diagnostic_buffer::empty_p () const
+ {
+-  if (m_per_format_buffer)
+-    return m_per_format_buffer->empty_p ();
+-  else
+-    return true;
++  if (m_per_format_buffers)
++    for (auto per_format_buffer : *m_per_format_buffers)
++      /* Query initial buffer.  */
++      return per_format_buffer->empty_p ();
++  return true;
+ }
  
+ void
+ diagnostic_buffer::move_to (diagnostic_buffer &dest)
+ {
+-  ensure_per_format_buffer ();
+-  dest.ensure_per_format_buffer ();
+-  m_per_format_buffer->move_to (*dest.m_per_format_buffer);
++  /* Bail if there's nothing to move.  */
++  if (!m_per_format_buffers)
++    return;
++
+   m_diagnostic_counters.move_to (dest.m_diagnostic_counters);
++
++  if (!dest.m_per_format_buffers)
++    {
++      /* Optimization for the "move to empty" case:
++	 simply move the vec to the dest.  */
++      dest.m_per_format_buffers = m_per_format_buffers;
++      m_per_format_buffers = nullptr;
++      return;
++    }
++
++  dest.ensure_per_format_buffers ();
++  gcc_assert (m_per_format_buffers);
++  gcc_assert (m_per_format_buffers->length ()
++	      == m_ctxt.m_output_sinks.length ());
++  gcc_assert (dest.m_per_format_buffers);
++  gcc_assert (dest.m_per_format_buffers->length ()
++	      == m_ctxt.m_output_sinks.length ());
++  for (unsigned idx = 0; idx < m_ctxt.m_output_sinks.length (); ++idx)
++    {
++      auto per_format_buffer_src = (*m_per_format_buffers)[idx];
++      auto per_format_buffer_dest = (*dest.m_per_format_buffers)[idx];
++      per_format_buffer_src->move_to (*per_format_buffer_dest);
++    }
+ }
+ 
+-/* Lazily get output format to create its own kind of buffer.  */
++/* Lazily get the output formats to create their own kind of buffers.
++   We can't change the output sinks on a context once this has been called
++   on any diagnostic_buffer instances for that context, since there's no
++   way to update all diagnostic_buffer instances for that context.  */
+ 
+ void
+-diagnostic_buffer::ensure_per_format_buffer ()
++diagnostic_buffer::ensure_per_format_buffers ()
+ {
+-  if (!m_per_format_buffer)
++  if (!m_per_format_buffers)
+     {
+-      gcc_assert (m_ctxt.get_output_format ());
+-      m_per_format_buffer
+-	= m_ctxt.get_output_format ()->make_per_format_buffer ();
++      m_per_format_buffers = new auto_vec<diagnostic_per_format_buffer *> ();
++      for (unsigned idx = 0; idx < m_ctxt.m_output_sinks.length (); ++idx)
++	{
++	  auto sink = m_ctxt.m_output_sinks[idx];
++	  auto per_format_buffer = sink->make_per_format_buffer ();
++	  m_per_format_buffers->safe_push (per_format_buffer.release ());
++	}
+     }
+-  gcc_assert (m_per_format_buffer);
++  gcc_assert (m_per_format_buffers);
++  gcc_assert (m_per_format_buffers->length ()
++	      == m_ctxt.m_output_sinks.length ());
+ }
+ 
+ /* Really call the system 'abort'.  This has to go right at the end of
 diff --git a/gcc/diagnostic.h b/gcc/diagnostic.h
-index 42a0b9ee2159..24c555e1cf28 100644
+index 3da1ae9c8019..47237b2adee0 100644
 --- a/gcc/diagnostic.h
 +++ b/gcc/diagnostic.h
-@@ -483,9 +483,14 @@ public:
+@@ -494,6 +494,7 @@ public:
+ 
+   friend class diagnostic_source_print_policy;
+   friend class diagnostic_text_output_format;
++  friend class diagnostic_buffer;
+ 
+   typedef void (*set_locations_callback_t) (diagnostic_context *,
+ 					    diagnostic_info *);
+@@ -501,6 +502,8 @@ public:
    void initialize (int n_opts);
    void color_init (int value);
    void urls_init (int value);
@@ -1280,17 +1458,11 @@ index 42a0b9ee2159..24c555e1cf28 100644
  
    void finish ();
  
-+  void dump (FILE *out) const;
-+  void DEBUG_FUNCTION dump () const { dump (stderr); }
-+
-   bool execution_failed_p () const;
- 
-   void set_original_argv (unique_argv original_argv);
-@@ -558,11 +563,6 @@ public:
+@@ -576,11 +579,6 @@ public:
  
    void emit_diagram (const diagnostic_diagram &diagram);
  
--  const diagnostic_output_format *get_output_format () const
+-  diagnostic_output_format *get_output_format () const
 -  {
 -    return m_output_format;
 -  }
@@ -1298,7 +1470,7 @@ index 42a0b9ee2159..24c555e1cf28 100644
    /* Various setters for use by option-handling logic.  */
    void set_output_format (std::unique_ptr<diagnostic_output_format> output_format);
    void set_text_art_charset (enum diagnostic_text_art_charset charset);
-@@ -580,10 +580,7 @@ public:
+@@ -598,10 +596,7 @@ public:
    }
    void set_show_cwe (bool val) { m_show_cwe = val;  }
    void set_show_rules (bool val) { m_show_rules = val; }
@@ -1310,8 +1482,8 @@ index 42a0b9ee2159..24c555e1cf28 100644
    void set_path_format (enum diagnostic_path_format val)
    {
      m_path_format = val;
-@@ -600,12 +597,16 @@ public:
-     m_ice_handler_cb = cb;
+@@ -614,12 +609,16 @@ public:
+     m_escape_format = val;
    }
  
 +  void set_format_decoder (printer_fn format_decoder);
@@ -1327,7 +1499,7 @@ index 42a0b9ee2159..24c555e1cf28 100644
    enum diagnostic_path_format get_path_format () const { return m_path_format; }
    enum diagnostics_escape_format get_escape_format () const
    {
-@@ -692,9 +693,17 @@ public:
+@@ -719,9 +718,17 @@ public:
  
    std::unique_ptr<pretty_printer> clone_printer () const
    {
@@ -1346,33 +1518,37 @@ index 42a0b9ee2159..24c555e1cf28 100644
  private:
    void error_recursion () ATTRIBUTE_NORETURN;
  
-@@ -705,11 +714,10 @@ private:
+@@ -735,13 +742,12 @@ private:
    /* Data members.
       Ideally, all of these would be private.  */
  
 -public:
 +private:
-   /* Where most of the diagnostic formatting work is done.  */
+   /* Where most of the diagnostic formatting work is done.
+      Owned by the context; this would be a std::unique_ptr if
+      diagnostic_context had a proper ctor.  */
 -  pretty_printer *m_printer;
 +  pretty_printer *m_reference_printer;
  
 -private:
-   /* Cache of source code.  */
-   file_cache *m_file_cache;
- 
-@@ -862,9 +870,10 @@ private:
+   /* Cache of source code.
+      Owned by the context; this would be a std::unique_ptr if
+      diagnostic_context had a proper ctor.  */
+@@ -902,11 +908,11 @@ private:
      int m_emission_count;
    } m_diagnostic_groups;
  
 +  // FIXME:
    /* How to output diagnostics (text vs a structured format such as JSON).
-      Must be non-NULL; owned by context.  */
+-     Must be non-NULL; owned by context.
+      This would be a std::unique_ptr if diagnostic_context had a proper
+      ctor.  */
 -  diagnostic_output_format *m_output_format;
 +  auto_vec<diagnostic_output_format *> m_output_sinks;
  
    /* Callback to set the locations of call sites along the inlining
       stack corresponding to a diagnostic location.  Needed to traverse
-@@ -930,12 +939,6 @@ diagnostic_text_finalizer (diagnostic_context *context)
+@@ -982,12 +988,6 @@ diagnostic_text_finalizer (diagnostic_context *context)
  #define diagnostic_context_auxiliary_data(DC) (DC)->m_client_aux_data
  #define diagnostic_info_auxiliary_data(DI) (DI)->x_data
  
@@ -1385,7 +1561,7 @@ index 42a0b9ee2159..24c555e1cf28 100644
  /* Raise SIGABRT on any diagnostic of severity DK_ERROR or higher.  */
  inline void
  diagnostic_abort_on_error (diagnostic_context *context)
-@@ -948,13 +951,15 @@ diagnostic_abort_on_error (diagnostic_context *context)
+@@ -1000,13 +1000,15 @@ diagnostic_abort_on_error (diagnostic_context *context)
     and similar functions.  */
  extern diagnostic_context *global_dc;
  
@@ -1403,7 +1579,7 @@ index 42a0b9ee2159..24c555e1cf28 100644
  /* The number of errors that have been issued so far.  Ideally, these
     would take a diagnostic_context as an argument.  */
 diff --git a/gcc/doc/invoke.texi b/gcc/doc/invoke.texi
-index 9aa05b81d10c..6cafa5ab8550 100644
+index aebcc9082ff6..22c9731b4765 100644
 --- a/gcc/doc/invoke.texi
 +++ b/gcc/doc/invoke.texi
 @@ -306,7 +306,8 @@ Objective-C and Objective-C++ Dialects}.
@@ -1519,28 +1695,10 @@ index 9aa05b81d10c..6cafa5ab8550 100644
  @opindex fdiagnostics-json-formatting
  @item -fno-diagnostics-json-formatting
 diff --git a/gcc/fortran/error.cc b/gcc/fortran/error.cc
-index 4ab6243ac137..875cc53ed1a5 100644
+index d633dc30d821..741bb3ffff77 100644
 --- a/gcc/fortran/error.cc
 +++ b/gcc/fortran/error.cc
-@@ -925,7 +925,7 @@ error_printf (const char *gmsgid, ...)
- static void
- gfc_clear_pp_buffer (output_buffer *this_buffer)
- {
--  pretty_printer *pp = global_dc->m_printer;
-+  pretty_printer *pp = global_dc->get_reference_printer ();
-   output_buffer *tmp_buffer = pp_buffer (pp);
-   pp_buffer (pp) = this_buffer;
-   pp_clear_output_area (pp);
-@@ -965,7 +965,7 @@ gfc_warning (int opt, const char *gmsgid, va_list ap)
-   diagnostic_info diagnostic;
-   rich_location rich_loc (line_table, UNKNOWN_LOCATION);
-   bool fatal_errors = global_dc->m_fatal_errors;
--  pretty_printer *pp = global_dc->m_printer;
-+  pretty_printer *pp = global_dc->get_reference_printer ();
-   output_buffer *tmp_buffer = pp_buffer (pp);
- 
-   gfc_clear_pp_buffer (pp_warning_buffer);
-@@ -1198,7 +1198,7 @@ gfc_diagnostic_build_kind_prefix (diagnostic_context *context,
+@@ -491,7 +491,7 @@ gfc_diagnostic_build_kind_prefix (diagnostic_context *context,
    gcc_assert (diagnostic->kind < DK_LAST_DIAGNOSTIC_KIND);
    const char *text = _(diagnostic_kind_text[diagnostic->kind]);
    const char *text_cs = "", *text_ce = "";
@@ -1549,34 +1707,7 @@ index 4ab6243ac137..875cc53ed1a5 100644
  
    if (diagnostic_kind_color[diagnostic->kind])
      {
-@@ -1471,7 +1471,7 @@ gfc_warning_check (void)
- {
-   if (! gfc_output_buffer_empty_p (pp_warning_buffer))
-     {
--      pretty_printer *pp = global_dc->m_printer;
-+      pretty_printer *pp = global_dc->get_reference_printer ();
-       output_buffer *tmp_buffer = pp_buffer (pp);
-       pp_buffer (pp) = pp_warning_buffer;
-       pp_really_flush (pp);
-@@ -1512,7 +1512,7 @@ gfc_error_opt (int opt, const char *gmsgid, va_list ap)
-   diagnostic_info diagnostic;
-   rich_location richloc (line_table, UNKNOWN_LOCATION);
-   bool fatal_errors = global_dc->m_fatal_errors;
--  pretty_printer *pp = global_dc->m_printer;
-+  pretty_printer *pp = global_dc->get_reference_printer ();
-   output_buffer *tmp_buffer = pp_buffer (pp);
- 
-   gfc_clear_pp_buffer (pp_error_buffer);
-@@ -1619,7 +1619,7 @@ gfc_error_check (void)
-       || ! gfc_output_buffer_empty_p (pp_error_buffer))
-     {
-       error_buffer.flag = false;
--      pretty_printer *pp = global_dc->m_printer;
-+      pretty_printer *pp = global_dc->get_reference_printer ();
-       output_buffer *tmp_buffer = pp_buffer (pp);
-       pp_buffer (pp) = pp_error_buffer;
-       pp_really_flush (pp);
-@@ -1713,7 +1713,7 @@ gfc_diagnostics_init (void)
+@@ -963,7 +963,7 @@ gfc_diagnostics_init (void)
    diagnostic_text_starter (global_dc) = gfc_diagnostic_text_starter;
    diagnostic_start_span (global_dc) = gfc_diagnostic_start_span;
    diagnostic_text_finalizer (global_dc) = gfc_diagnostic_text_finalizer;
@@ -1584,7 +1715,7 @@ index 4ab6243ac137..875cc53ed1a5 100644
 +  global_dc->set_format_decoder (gfc_format_decoder);
    global_dc->m_source_printing.caret_chars[0] = '1';
    global_dc->m_source_printing.caret_chars[1] = '2';
-   pp_warning_buffer = new (XNEW (output_buffer)) output_buffer ();
+   pp_warning_buffer = new diagnostic_buffer (*global_dc);
 diff --git a/gcc/gcc.cc b/gcc/gcc.cc
 index 9998fd33343f..3386be0fe897 100644
 --- a/gcc/gcc.cc
@@ -1753,10 +1884,10 @@ index 6e97b389cbb0..77ae2add4790 100644
    void
 diff --git a/gcc/opts-diagnostic.cc b/gcc/opts-diagnostic.cc
 new file mode 100644
-index 000000000000..77ac2c5d47a9
+index 000000000000..cbe8ea9e8b05
 --- /dev/null
 +++ b/gcc/opts-diagnostic.cc
-@@ -0,0 +1,670 @@
+@@ -0,0 +1,671 @@
 +/* FIXME.
 +   Copyright (C) 2024 Free Software Foundation, Inc.
 +
@@ -2159,8 +2290,9 @@ index 000000000000..77ac2c5d47a9
 +  if (!outf)
 +    {
 +      rich_location richloc (m_location_mgr, m_loc);
-+      m_dc.emit_diagnostic (DK_ERROR, richloc, nullptr, 0,
-+			    "unable to open %qs: %m", filename.get ());
++      m_dc.emit_diagnostic_with_group
++	(DK_ERROR, richloc, nullptr, 0,
++	 "unable to open %qs: %m", filename.get ());
 +      return diagnostic_output_file (nullptr, false, std::move (filename));
 +    }
 +  return diagnostic_output_file (outf, true, std::move (filename));
@@ -2496,146 +2628,6 @@ index 1c5092e22feb..eb7addf43589 100644
        diagnostic_set_caret_max_width (dc, value);
        break;
  
-diff --git a/gcc/pretty-print-format-impl.h b/gcc/pretty-print-format-impl.h
-index ec4425c9dafb..89ecccb7068a 100644
---- a/gcc/pretty-print-format-impl.h
-+++ b/gcc/pretty-print-format-impl.h
-@@ -348,8 +348,8 @@ public:
-   void merge_consecutive_text_tokens ();
-   void apply_urlifier (const urlifier &urlifier);
- 
--  void dump (FILE *out) const;
--  void DEBUG_FUNCTION dump () const { dump (stderr); }
-+  void dump (FILE *out, int indent) const;
-+  void DEBUG_FUNCTION dump () const { dump (stderr, 0); }
- 
-   obstack &m_obstack;
- 
-@@ -373,8 +373,8 @@ public:
- 
-   void append_formatted_chunk (obstack &s, const char *content);
- 
--  void dump (FILE *out) const;
--  void DEBUG_FUNCTION dump () const { dump (stderr); }
-+  void dump (FILE *out, int indent) const;
-+  void DEBUG_FUNCTION dump () const { dump (stderr, 0); }
- 
-   // For use in selftests
-   pp_formatted_chunks *get_prev () const { return m_prev; }
-diff --git a/gcc/pretty-print.cc b/gcc/pretty-print.cc
-index 12c91798f417..fe32c4226402 100644
---- a/gcc/pretty-print.cc
-+++ b/gcc/pretty-print.cc
-@@ -793,15 +793,17 @@ output_buffer::pop_formatted_chunks ()
- /* Dump state of this output_buffer to OUT, for debugging.  */
- 
- void
--output_buffer::dump (FILE *out) const
-+output_buffer::dump (FILE *out, int indent) const
- {
-   int depth = 0;
-   for (pp_formatted_chunks *iter = m_cur_formatted_chunks;
-        iter;
-        iter = iter->m_prev, depth++)
-     {
--      fprintf (out, "pp_formatted_chunks: depth %i\n", depth);
--      iter->dump (out);
-+      fprintf (out, "%*spp_formatted_chunks: depth %i\n",
-+	       indent, "",
-+	       depth);
-+      iter->dump (out, indent + 2);
-     }
- }
- 
-@@ -1499,9 +1501,9 @@ pp_token_list::apply_urlifier (const urlifier &urlifier)
- }
- 
- void
--pp_token_list::dump (FILE *out) const
-+pp_token_list::dump (FILE *out, int indent) const
- {
--  fprintf (out, "[");
-+  fprintf (out, "%*s[", indent, "");
-   for (auto iter = m_first; iter; iter = iter->m_next)
-     {
-       iter->dump (out);
-@@ -1528,12 +1530,14 @@ pp_formatted_chunks::append_formatted_chunk (obstack &s, const char *content)
- }
- 
- void
--pp_formatted_chunks::dump (FILE *out) const
-+pp_formatted_chunks::dump (FILE *out, int indent) const
- {
-   for (size_t idx = 0; m_args[idx]; ++idx)
-     {
--      fprintf (out, "%i: ", (int)idx);
--      m_args[idx]->dump (out);
-+      fprintf (out, "%*s%i:\n",
-+	       indent, "",
-+	       (int)idx);
-+      m_args[idx]->dump (out, indent + 2);
-     }
- }
- 
-@@ -3056,9 +3060,30 @@ pretty_printer::end_url ()
- /* Dump state of this pretty_printer to OUT, for debugging.  */
- 
- void
--pretty_printer::dump (FILE *out) const
-+pretty_printer::dump (FILE *out, int indent) const
- {
--  m_buffer->dump (out);
-+  fprintf (out, "%*sm_show_color: %s\n",
-+	   indent, "",
-+	   m_show_color ? "true" : "false");
-+
-+  fprintf (out, "%*sm_url_format: ", indent, "");
-+  switch (m_url_format)
-+    {
-+    case URL_FORMAT_NONE:
-+      fprintf (out, "none");
-+      break;
-+    case URL_FORMAT_ST:
-+      fprintf (out, "st");
-+      break;
-+    case URL_FORMAT_BEL:
-+      fprintf (out, "bel");
-+      break;
-+    default:
-+      gcc_unreachable ();
-+    }
-+  fprintf (out, "\n");
-+
-+  m_buffer->dump (out, indent + 2);
- }
- 
- /* class pp_markup::context.  */
-diff --git a/gcc/pretty-print.h b/gcc/pretty-print.h
-index d1495367b232..14a6e9b4f5a1 100644
---- a/gcc/pretty-print.h
-+++ b/gcc/pretty-print.h
-@@ -101,8 +101,8 @@ public:
-   pp_formatted_chunks *push_formatted_chunks ();
-   void pop_formatted_chunks ();
- 
--  void dump (FILE *out) const;
--  void DEBUG_FUNCTION dump () const { dump (stderr); }
-+  void dump (FILE *out, int indent) const;
-+  void DEBUG_FUNCTION dump () const { dump (stderr, 0); }
- 
-   /* Obstack where the text is built up.  */
-   struct obstack m_formatted_obstack;
-@@ -324,8 +324,8 @@ public:
-   void set_real_maximum_length ();
-   int remaining_character_count_for_line ();
- 
--  void dump (FILE *out) const;
--  void DEBUG_FUNCTION dump () const { dump (stderr); }
-+  void dump (FILE *out, int indent) const;
-+  void DEBUG_FUNCTION dump () const { dump (stderr, 0); }
- 
- private:
-   /* Where we print external representation of ENTITY.  */
 diff --git a/gcc/selftest-diagnostic.cc b/gcc/selftest-diagnostic.cc
 index a066fe20066b..a9118b55f18f 100644
 --- a/gcc/selftest-diagnostic.cc
@@ -2755,10 +2747,10 @@ index f7952e7d1d12..954538f962bb 100644
        diagnostic_thread_id_t thread_2 = path.add_thread ("Thread 2");
        path.add_entry (entry_to_foo, 0, "foo", thread_1);
 diff --git a/gcc/testsuite/gcc.dg/plugin/diagnostic_plugin_xhtml_format.c b/gcc/testsuite/gcc.dg/plugin/diagnostic_plugin_xhtml_format.c
-index 0534ff47450c..3fee0f9f06e7 100644
+index 2f95e4a0ceb8..aa03b7d5d2cc 100644
 --- a/gcc/testsuite/gcc.dg/plugin/diagnostic_plugin_xhtml_format.c
 +++ b/gcc/testsuite/gcc.dg/plugin/diagnostic_plugin_xhtml_format.c
-@@ -283,13 +283,18 @@ public:
+@@ -316,13 +316,18 @@ public:
  
    const xml::document &get_document () const { return *m_document; }
  
@@ -2778,7 +2770,7 @@ index 0534ff47450c..3fee0f9f06e7 100644
    const line_maps *m_line_maps;
  
    std::unique_ptr<xml::document> m_document;
-@@ -321,7 +326,7 @@ xhtml_builder::xhtml_builder (diagnostic_context &context,
+@@ -400,7 +405,7 @@ xhtml_builder::xhtml_builder (diagnostic_context &context,
  			      pretty_printer &pp,
  			      const line_maps *line_maps)
  : m_context (context),
@@ -2787,7 +2779,7 @@ index 0534ff47450c..3fee0f9f06e7 100644
    m_line_maps (line_maps)
  {
    gcc_assert (m_line_maps);
-@@ -469,10 +474,10 @@ xhtml_builder::make_element_for_diagnostic (const diagnostic_info &diagnostic,
+@@ -565,10 +570,10 @@ xhtml_builder::make_element_for_diagnostic (const diagnostic_info &diagnostic,
  
    auto message_span = make_span (label_text::borrow ("gcc-message"));
    xhtml_token_printer tok_printer (*this, *message_span.get ());
@@ -2802,7 +2794,7 @@ index 0534ff47450c..3fee0f9f06e7 100644
    diag_element->add_child (std::move (message_span));
  
    if (diagnostic.metadata)
-@@ -530,10 +535,10 @@ xhtml_builder::make_element_for_diagnostic (const diagnostic_info &diagnostic,
+@@ -626,10 +631,10 @@ xhtml_builder::make_element_for_diagnostic (const diagnostic_info &diagnostic,
      pre->set_attr ("class", label_text::borrow ("gcc-annotated-source"));
      // TODO: ideally we'd like to capture elements within the following:
      diagnostic_show_locus (&m_context, diagnostic.richloc, diagnostic.kind,
@@ -2816,7 +2808,7 @@ index 0534ff47450c..3fee0f9f06e7 100644
      diag_element->add_child (std::move (pre));
    }
  
-@@ -626,6 +631,23 @@ public:
+@@ -723,6 +728,23 @@ public:
    {
      /* No-op, but perhaps could show paths here.  */
    }
@@ -2995,10 +2987,10 @@ index f27f3ee2164b..91801fc1157e 100644
  	unsupported "$testcase verify-sarif-file: python3 is missing"
  	return
 diff --git a/gcc/toplev.cc b/gcc/toplev.cc
-index 07a92c4ae3a1..3ab716b186e6 100644
+index a12a2e1afba1..a4d67f88c4da 100644
 --- a/gcc/toplev.cc
 +++ b/gcc/toplev.cc
-@@ -230,7 +230,7 @@ announce_function (tree decl)
+@@ -231,7 +231,7 @@ announce_function (tree decl)
  	fprintf (stderr, " %s",
  		 identifier_to_locale (lang_hooks.decl_printable_name (decl, 2)));
        fflush (stderr);
@@ -3007,7 +2999,7 @@ index 07a92c4ae3a1..3ab716b186e6 100644
        diagnostic_set_last_function (global_dc, (diagnostic_info *) NULL);
      }
  }
-@@ -2388,7 +2388,7 @@ toplev::main (int argc, char **argv)
+@@ -2389,7 +2389,7 @@ toplev::main (int argc, char **argv)
    if (auto edit_context_ptr = global_dc->get_edit_context ())
      {
        pretty_printer pp;
@@ -3043,10 +3035,10 @@ index dbc8ef6ae013..aee780f4b8e3 100644
    }
    ~tree_dump_pretty_printer ()
 diff --git a/gcc/tree.cc b/gcc/tree.cc
-index a2022ae27cf4..31fbd660c0e4 100644
+index 0e0dbee63251..658270322f2f 100644
 --- a/gcc/tree.cc
 +++ b/gcc/tree.cc
-@@ -12404,7 +12404,7 @@ escaped_string::escape (const char *unescaped)
+@@ -12429,7 +12429,7 @@ escaped_string::escape (const char *unescaped)
  	  continue;
  	}
  
@@ -3055,7 +3047,7 @@ index a2022ae27cf4..31fbd660c0e4 100644
  	{
  	  if (escaped == NULL)
  	    {
-@@ -15832,7 +15832,7 @@ test_escaped_strings (void)
+@@ -15901,7 +15901,7 @@ test_escaped_strings (void)
    ASSERT_STREQ ("foobar", (const char *) msg);
  
    /* Ensure that we have -fmessage-length set to 0.  */

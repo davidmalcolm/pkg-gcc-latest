@@ -18,7 +18,7 @@
 
 Name:		gcc-latest
 Version:	VERSION
-Release:	PKGREL.SNAPINFO.pr116613.v0.128%{?dist}
+Release:	PKGREL.SNAPINFO.pr116613.v0.155%{?dist}
 Summary:	Weekly snapshot of GCC trunk
 
 License:	GPLv3+ and GPLv3+ with exceptions and GPLv2+ with exceptions and LGPLv2+ and BSD
@@ -40,20 +40,20 @@ BuildRequires:	gmp-devel >= 4.1.2-8, mpfr-devel >= 2.2.1, mpc-devel >= 0.8.1
 BuildRequires:	libdw-devel >= 0.147
 BuildRequires:	libelf-devel >= 0.147
 %endif
+BuildRequires:	perl
 Requires:	binutils >= 2.24
 Requires:	glibc >= 2.17
 
 Provides:	bundled(libiberty)
 
-Patch1: 0001-pushed-lto-reimplement-print_lto_docs_link-PR116613.patch
-Patch2: 0002-pushed-diagnostics-mark-the-JSON-output-format-as-de.patch
-Patch3: 0003-pushed-diagnostics-move-text-output-member-functions.patch
-Patch4: 0004-FIXME-analyzer_cpython_plugin.c-use-success_call_inf.patch
-Patch5: 0005-FIXME-use-unique_ptr-in-more-places-in-pretty_printe.patch
-Patch6: 0006-FIXME-hack-in-define-INCLUDE_MEMORY-into-system.h-is.patch
-Patch7: 0007-FIXME-WIP-on-get_desc-print_desc.patch
-Patch8: 0008-FIXME-WIP-on-fdiagnostics-add-output-PR116613.patch
-Patch9: 0009-FIXME-fixups-for-add-output.patch
+Patch1: 0001-pushed-Implement-Fortran-diagnostic-buffering-for-no.patch
+Patch2: 0002-pushed-jit-reset-state-in-varasm.cc-PR117275.patch
+Patch3: 0003-pushed-Add-comment-about-pp_format-to-diagnostic_con.patch
+Patch4: 0004-pushed-Use-unique_ptr-in-more-places-in-pretty_print.patch
+Patch5: 0005-analyzer-avoid-implicit-use-of-global_dc-s-pretty_pr.patch
+Patch6: 0006-FIXME-WIP-on-fdiagnostics-add-output-PR116613.patch
+Patch7: 0007-FIXME-also-add-fdiagnostics-set-output.patch
+Patch8: 0008-FIXME-replace-fdiagnostics-format-sarif-file-2.2-pre.patch
 
 %description
 GNU C and C++ compilers built from a weekly development snapshot.
@@ -68,7 +68,6 @@ GNU C and C++ compilers built from a weekly development snapshot.
 %patch 6 -p1
 %patch 7 -p1
 %patch 8 -p1
-%patch 9 -p1
 
 %build
 CC=gcc
@@ -138,6 +137,11 @@ done
 
 
 %changelog
+* Thu Oct 24 2024 David Malcolm <dmalcolm@redhat.com> - 15.0.0-4.pr116613.v0.155
+- update work-in-progress patches for PR 116613
+- rebase to latest snapshot
+- add BR on perl to try to fix manpages
+
 * Fri Oct 11 2024 David Malcolm <dmalcolm@redhat.com> - 15.0.0-4.pr116613.v0.128
 - add work-in-progress patches for PR 116613
 
