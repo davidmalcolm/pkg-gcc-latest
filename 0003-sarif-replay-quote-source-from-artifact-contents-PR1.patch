@@ -1,0 +1,968 @@
+From 4989eda3ca15ae8c97ec5e7c0d8927e94ed222bb Mon Sep 17 00:00:00 2001
+From: David Malcolm <dmalcolm@redhat.com>
+Date: Mon, 9 Dec 2024 17:41:28 -0500
+Subject: [pushed: r15-6284] sarif-replay: quote source from artifact contents
+ [PR117943]
+
+The diagnostic source-quoting machinery uses class file_cache
+implemented in gcc/input.cc for (re)reading the source when
+issuing diagnostics.
+
+When sarif-replay issues a saved diagnostic it might be running
+in a different path to where the .sarif file was captured, or
+on an entirely different machine.
+
+Previously such invocations would lead to the source-quoting
+silently failing, even if the content of the file is recorded
+in the .sarif file in the artifact "contents" property (which
+gcc populates when emitting .sarif output).
+
+This patch:
+- adds the ability for slots in file_cache to be populated from memory
+rather than from the filesystem
+- exposes it in libgdiagnostics via a new entrypoint
+- uses this in sarif-replay for any artifacts with a "contents"
+property, so that source-quoting uses that rather than trying to read
+from the path on the filesystem
+
+Successfully bootstrapped & regrtested on x86_64-pc-linux-gnu.
+Pushed to trunk as r15-6284-g778336e0e4f257.
+
+gcc/ChangeLog:
+	PR sarif-replay/117943
+	* doc/libgdiagnostics/topics/physical-locations.rst
+	(diagnostic_manager_new_file): Drop "const" from return type.
+	* doc/libgdiagnostics/tutorial/02-physical-locations.rst: Drop
+	"const" from "main_file" decl.
+	* input.cc (file_cache::add_buffered_content): New.
+	(file_cache_slot::set_content): New.
+	(file_cache_slot::dump): Use m_file_path being null rather than
+	m_fp to determine empty slots.  Dump m_fp.
+	(find_end_of_line): Drop "const" from return type and param.  Add
+	forward decl.
+	(file_cache_slot::get_next_line): Fix "const"-ness.
+	(selftest::test_reading_source_buffer): New.
+	(selftest::input_cc_tests): Call it.
+	* input.h (file_cache::add_buffered_content): New decl.
+	* libgdiagnostics++.h (class file): Drop const-ness from m_inner.
+	(file::set_buffered_content): New.
+	* libgdiagnostics.cc (class content_buffer): New.
+	(diagnostic_file::diagnostic_file): Add "mgr" param.
+	(diagnostic_file::get_content): New.
+	(diagnostic_file::set_buffered_content): New.
+	(diagnostic_file::m_mgr): New.
+	(diagnostic_file::m_content): New.
+	(diagnostic_manager::new_file): Drop const-ness.  Pass *this to
+	ctor.
+	(diagnostic_file::set_buffered_content): New.
+	(diagnostic_manager_new_file): Drop "const" from return type.
+	(diagnostic_file_set_buffered_content): New entrypoint.
+	(diagnostic_manager_debug_dump_file): Dump the content size,
+	if any.
+	* libgdiagnostics.h (diagnostic_manager_new_file): Drop "const"
+	from return type.
+	(diagnostic_file_set_buffered_content): New decl.
+	* libgdiagnostics.map (diagnostic_file_set_buffered_content): New
+	symbol.
+	* libsarifreplay.cc (sarif_replayer::m_artifacts_arr): Convert
+	from json::value to json::array.
+	(sarif_replayer::handle_run_obj): Call handle_artifact_obj
+	on all artifacts.
+	(sarif_replayer::handle_artifact_obj): New.
+
+gcc/testsuite/ChangeLog:
+	PR sarif-replay/117943
+	* sarif-replay.dg/2.1.0-valid/error-with-note.sarif: Update
+	expected output to include quoted source code and underlines.
+	* sarif-replay.dg/2.1.0-valid/signal-1.c.moved.sarif: New test.
+	* sarif-replay.dg/2.1.0-valid/signal-1.c.sarif: Update expected
+	output to include quoted source code and underlines.
+
+Signed-off-by: David Malcolm <dmalcolm@redhat.com>
+---
+ .../topics/physical-locations.rst             |   6 +-
+ .../tutorial/02-physical-locations.rst        |   2 +-
+ gcc/input.cc                                  |  97 +++++++-
+ gcc/input.h                                   |   4 +
+ gcc/libgdiagnostics++.h                       |  16 +-
+ gcc/libgdiagnostics.cc                        |  82 +++++--
+ gcc/libgdiagnostics.h                         |  13 +-
+ gcc/libgdiagnostics.map                       |   1 +
+ gcc/libsarifreplay.cc                         |  74 +++++-
+ .../2.1.0-valid/error-with-note.sarif         |   5 +-
+ .../2.1.0-valid/signal-1.c.moved.sarif        | 220 ++++++++++++++++++
+ .../2.1.0-valid/signal-1.c.sarif              |  27 ++-
+ 12 files changed, 510 insertions(+), 37 deletions(-)
+ create mode 100644 gcc/testsuite/sarif-replay.dg/2.1.0-valid/signal-1.c.moved.sarif
+
+diff --git a/gcc/doc/libgdiagnostics/topics/physical-locations.rst b/gcc/doc/libgdiagnostics/topics/physical-locations.rst
+index cf10f5315c8e..692dac9bc188 100644
+--- a/gcc/doc/libgdiagnostics/topics/physical-locations.rst
++++ b/gcc/doc/libgdiagnostics/topics/physical-locations.rst
+@@ -35,9 +35,9 @@ locations.
+ 
+    A :type:`diagnostic_file` is an opaque type describing a particular input file.
+ 
+-.. function:: const diagnostic_file * diagnostic_manager_new_file (diagnostic_manager *diag_mgr, \
+-                                                                   const char *name, \
+-                                                                   const char *sarif_source_language)
++.. function:: diagnostic_file * diagnostic_manager_new_file (diagnostic_manager *diag_mgr, \
++                                                             const char *name, \
++                                                             const char *sarif_source_language)
+ 
+    Create a new :type:`diagnostic_file` for file ``name``. Repeated calls
+    with strings that match ``name`` will return the same object.
+diff --git a/gcc/doc/libgdiagnostics/tutorial/02-physical-locations.rst b/gcc/doc/libgdiagnostics/tutorial/02-physical-locations.rst
+index cb7aefbf81b7..d11493ca0603 100644
+--- a/gcc/doc/libgdiagnostics/tutorial/02-physical-locations.rst
++++ b/gcc/doc/libgdiagnostics/tutorial/02-physical-locations.rst
+@@ -54,7 +54,7 @@ Source files
+ Given these declarations::
+ 
+   static diagnostic_manager *diag_mgr;
+-  static const diagnostic_file *main_file;
++  static diagnostic_file *main_file;
+ 
+ we can create a :type:`diagnostic_file` describing an input file ``foo.c``
+ via :func:`diagnostic_manager_new_file`::
+diff --git a/gcc/input.cc b/gcc/input.cc
+index b4911581924d..cd596d32837d 100644
+--- a/gcc/input.cc
++++ b/gcc/input.cc
+@@ -77,6 +77,7 @@ public:
+   bool create (const file_cache::input_context &in_context,
+ 	       const char *file_path, FILE *fp, unsigned highest_use_count);
+   void evict ();
++  void set_content (const char *buf, size_t sz);
+ 
+  private:
+   /* These are information used to store a line boundary.  */
+@@ -188,6 +189,9 @@ public:
+ 
+ };
+ 
++static const char *
++find_end_of_line (const char *s, size_t len);
++
+ /* Current position in real source file.  */
+ 
+ location_t input_location = UNKNOWN_LOCATION;
+@@ -367,6 +371,25 @@ file_cache::missing_trailing_newline_p (const char *file_path)
+   return r->missing_trailing_newline_p ();
+ }
+ 
++void
++file_cache::add_buffered_content (const char *file_path,
++				  const char *buffer,
++				  size_t sz)
++{
++  gcc_assert (file_path);
++
++  file_cache_slot *r = lookup_file (file_path);
++  if (!r)
++    {
++      unsigned highest_use_count = 0;
++      r = evicted_cache_tab_entry (&highest_use_count);
++      if (!r->create (m_input_context, file_path, nullptr, highest_use_count))
++	return;
++    }
++
++  r->set_content (buffer, sz);
++}
++
+ void
+ file_cache_slot::evict ()
+ {
+@@ -512,6 +535,32 @@ file_cache_slot::create (const file_cache::input_context &in_context,
+   return true;
+ }
+ 
++void
++file_cache_slot::set_content (const char *buf, size_t sz)
++{
++  m_data = (char *)xmalloc (sz);
++  memcpy (m_data, buf, sz);
++  m_nb_read = m_size = sz;
++  m_alloc_offset = 0;
++
++  if (m_fp)
++    {
++      fclose (m_fp);
++      m_fp = nullptr;
++    }
++
++  /* Compute m_total_lines based on content of buffer.  */
++  m_total_lines = 0;
++  const char *line_start = m_data;
++  size_t remaining_size = sz;
++  while (const char *line_end = find_end_of_line (line_start, remaining_size))
++    {
++      ++m_total_lines;
++      remaining_size -= line_end + 1 - line_start;
++      line_start = line_end + 1;
++    }
++}
++
+ /* file_cache's ctor.  */
+ 
+ file_cache::file_cache ()
+@@ -592,12 +641,13 @@ file_cache_slot::~file_cache_slot ()
+ void
+ file_cache_slot::dump (FILE *out, int indent) const
+ {
+-  if (!m_fp)
++  if (!m_file_path)
+     {
+       fprintf (out, "%*s(unused)\n", indent, "");
+       return;
+     }
+   fprintf (out, "%*sfile_path: %s\n", indent, "", m_file_path);
++  fprintf (out, "%*sfp: %p\n", indent, "", (void *)m_fp);
+   fprintf (out, "%*sneeds_read_p: %i\n", indent, "", (int)needs_read_p ());
+   fprintf (out, "%*sneeds_grow_p: %i\n", indent, "", (int)needs_grow_p ());
+   fprintf (out, "%*suse_count: %i\n", indent, "", m_use_count);
+@@ -701,8 +751,8 @@ file_cache_slot::maybe_read_data ()
+    terminator was not found.  We need to determine line endings in the same
+    manner that libcpp does: any of \n, \r\n, or \r is a line ending.  */
+ 
+-static char *
+-find_end_of_line (char *s, size_t len)
++static const char *
++find_end_of_line (const char *s, size_t len)
+ {
+   for (const auto end = s + len; s != end; ++s)
+     {
+@@ -748,11 +798,11 @@ file_cache_slot::get_next_line (char **line, ssize_t *line_len)
+     /* There is no more data to process.  */
+     return false;
+ 
+-  char *line_start = m_data + m_line_start_idx;
++  const char *line_start = m_data + m_line_start_idx;
+ 
+-  char *next_line_start = NULL;
++  const char *next_line_start = NULL;
+   size_t len = 0;
+-  char *line_end = find_end_of_line (line_start, remaining_size);
++  const char *line_end = find_end_of_line (line_start, remaining_size);
+   if (line_end == NULL)
+     {
+       /* We haven't found an end-of-line delimiter in the cache.
+@@ -806,7 +856,7 @@ file_cache_slot::get_next_line (char **line, ssize_t *line_len)
+   len = line_end - line_start;
+ 
+   if (m_line_start_idx < m_nb_read)
+-    *line = line_start;
++    *line = const_cast<char *> (line_start);
+ 
+   ++m_line_num;
+ 
+@@ -2342,6 +2392,38 @@ test_reading_source_line ()
+   ASSERT_TRUE (source_line.get_buffer () == NULL);
+ }
+ 
++/* Verify reading from buffers (e.g. for sarif-replay).  */
++
++static void
++test_reading_source_buffer ()
++{
++  const char *text = ("01234567890123456789\n"
++		      "This is the test text\n"
++		      "This is the 3rd line");
++  const char *filename = "foo.txt";
++  file_cache fc;
++  fc.add_buffered_content (filename, text, strlen (text));
++
++  /* Read back a specific line from the tempfile.  */
++  char_span source_line = fc.get_source_line (filename, 3);
++  ASSERT_TRUE (source_line);
++  ASSERT_TRUE (source_line.get_buffer () != NULL);
++  ASSERT_EQ (20, source_line.length ());
++  ASSERT_TRUE (!strncmp ("This is the 3rd line",
++			 source_line.get_buffer (), source_line.length ()));
++
++  source_line = fc.get_source_line (filename, 2);
++  ASSERT_TRUE (source_line);
++  ASSERT_TRUE (source_line.get_buffer () != NULL);
++  ASSERT_EQ (21, source_line.length ());
++  ASSERT_TRUE (!strncmp ("This is the test text",
++			 source_line.get_buffer (), source_line.length ()));
++
++  source_line = fc.get_source_line (filename, 4);
++  ASSERT_FALSE (source_line);
++  ASSERT_TRUE (source_line.get_buffer () == NULL);
++}
++
+ /* Tests of lexing.  */
+ 
+ /* Verify that token TOK from PARSER has cpp_token_as_text
+@@ -4227,6 +4309,7 @@ input_cc_tests ()
+   for_each_line_table_case (test_lexer_char_constants);
+ 
+   test_reading_source_line ();
++  test_reading_source_buffer ();
+ 
+   test_line_offset_overflow ();
+ 
+diff --git a/gcc/input.h b/gcc/input.h
+index fb3ef120607d..871cd539d048 100644
+--- a/gcc/input.h
++++ b/gcc/input.h
+@@ -157,6 +157,10 @@ class file_cache
+   char_span get_source_line (const char *file_path, int line);
+   bool missing_trailing_newline_p (const char *file_path);
+ 
++  void add_buffered_content (const char *file_path,
++			     const char *buffer,
++			     size_t sz);
++
+  private:
+   file_cache_slot *evicted_cache_tab_entry (unsigned *highest_use_count);
+   file_cache_slot *add_file (const char *file_path);
+diff --git a/gcc/libgdiagnostics++.h b/gcc/libgdiagnostics++.h
+index 018f737d38cb..61dbc9536093 100644
+--- a/gcc/libgdiagnostics++.h
++++ b/gcc/libgdiagnostics++.h
+@@ -67,17 +67,19 @@ public:
+   diagnostic_text_sink *m_inner;
+ };
+ 
+-/* Wrapper around a const diagnostic_file *.  */
++/* Wrapper around a diagnostic_file *.  */
+ 
+ class file
+ {
+ public:
+   file () : m_inner (nullptr) {}
+-  file (const diagnostic_file *file) : m_inner (file) {}
++  file (diagnostic_file *file) : m_inner (file) {}
+   file (const file &other) : m_inner (other.m_inner) {}
+   file &operator= (const file &other) { m_inner = other.m_inner; return *this; }
+ 
+-  const diagnostic_file * m_inner;
++  void set_buffered_content (const char *data, size_t sz);
++
++  diagnostic_file * m_inner;
+ };
+ 
+ /* Wrapper around a const diagnostic_physical_location *.  */
+@@ -362,6 +364,14 @@ public:
+ 
+ // Implementation
+ 
++// class file
++
++inline void
++file::set_buffered_content (const char *data, size_t sz)
++{
++  diagnostic_file_set_buffered_content (m_inner, data, sz);
++}
++
+ // class execution_path
+ 
+ inline diagnostic_event_id
+diff --git a/gcc/libgdiagnostics.cc b/gcc/libgdiagnostics.cc
+index 448f19b1f1b5..00f8fefe838e 100644
+--- a/gcc/libgdiagnostics.cc
++++ b/gcc/libgdiagnostics.cc
+@@ -66,12 +66,34 @@ private:
+   char *m_str;
+ };
+ 
++class content_buffer
++{
++public:
++  content_buffer (const char *data, size_t sz)
++  : m_data (xmalloc (sz)),
++    m_sz (sz)
++  {
++    memcpy (m_data, data, sz);
++  }
++  ~content_buffer ()
++  {
++    free (m_data);
++  }
++
++  void *m_data;
++  size_t m_sz;
++};
++
+ /* This has to be a "struct" as it is exposed in the C API.  */
+ 
+ struct diagnostic_file
+ {
+-  diagnostic_file (const char *name, const char *sarif_source_language)
+-  : m_name (name), m_sarif_source_language (sarif_source_language)
++  diagnostic_file (diagnostic_manager &mgr,
++		   const char *name,
++		   const char *sarif_source_language)
++  : m_mgr (mgr),
++    m_name (name),
++    m_sarif_source_language (sarif_source_language)
+   {
+   }
+ 
+@@ -81,9 +103,18 @@ struct diagnostic_file
+     return m_sarif_source_language.get_str ();
+   }
+ 
++  const content_buffer *
++  get_content () const
++  {
++    return m_content.get ();
++  }
++  void set_buffered_content (const char *buf, size_t sz);
++
+ private:
++  diagnostic_manager &m_mgr;
+   owned_nullable_string m_name;
+   owned_nullable_string m_sarif_source_language;
++  std::unique_ptr<content_buffer> m_content;
+ };
+ 
+ /* This has to be a "struct" as it is exposed in the C API.  */
+@@ -365,13 +396,14 @@ public:
+   void emit (diagnostic &diag, const char *msgid, va_list *args)
+     LIBGDIAGNOSTICS_PARAM_GCC_FORMAT_STRING(3, 0);
+ 
+-  const diagnostic_file *
++  diagnostic_file *
+   new_file (const char *name,
+ 	    const char *sarif_source_language)
+   {
+     if (diagnostic_file **slot = m_str_to_file_map.get (name))
+       return *slot;
+-    diagnostic_file *file = new diagnostic_file (name, sarif_source_language);
++    diagnostic_file *file
++      = new diagnostic_file (*this, name, sarif_source_language);
+     m_str_to_file_map.put (file->get_name (), file);
+     return file;
+   }
+@@ -851,6 +883,16 @@ diagnostic_t_from_diagnostic_level (enum diagnostic_level level)
+     }
+ }
+ 
++void
++diagnostic_file::set_buffered_content (const char *buf, size_t sz)
++{
++  m_content = ::make_unique<content_buffer> (buf, sz);
++
++  // Populate file_cache:
++  file_cache &fc = m_mgr.get_dc ().get_file_cache ();
++  fc.add_buffered_content (m_name.get_str (), buf, sz);
++}
++
+ /* class impl_diagnostic_client_data_hooks.  */
+ 
+ const client_version_info *
+@@ -1192,7 +1234,7 @@ diagnostic_manager_write_patch (diagnostic_manager *diag_mgr,
+ 
+ /* Public entrypoint.  */
+ 
+-const diagnostic_file *
++diagnostic_file *
+ diagnostic_manager_new_file (diagnostic_manager *diag_mgr,
+ 			     const char *name,
+ 			     const char *sarif_source_language)
+@@ -1203,6 +1245,19 @@ diagnostic_manager_new_file (diagnostic_manager *diag_mgr,
+   return diag_mgr->new_file (name, sarif_source_language);
+ }
+ 
++/* Public entrypoint.  */
++
++void
++diagnostic_file_set_buffered_content (diagnostic_file *file,
++				      const char *buf,
++				      size_t sz)
++{
++  FAIL_IF_NULL (file);
++  FAIL_IF_NULL (buf);
++
++  file->set_buffered_content (buf, sz);
++}
++
+ void
+ diagnostic_manager_debug_dump_file (diagnostic_manager *,
+ 				    const diagnostic_file *file,
+@@ -1211,17 +1266,14 @@ diagnostic_manager_debug_dump_file (diagnostic_manager *,
+   FAIL_IF_NULL (out);
+   if (file)
+     {
++      fprintf (out, "file(name=\"%s\"",
++	       file->get_name ());
+       if (file->get_sarif_source_language ())
+-	{
+-	  fprintf (out, "file(name=\"%s\", sarif_source_language=\"%s\")",
+-		   file->get_name (),
+-		   file->get_sarif_source_language ());
+-	}
+-      else
+-	{
+-	  fprintf (out, "file(name=\"%s\")",
+-		   file->get_name ());
+-	}
++	fprintf (out, ", sarif_source_language=\"%s\"",
++		 file->get_sarif_source_language ());
++      if (const content_buffer *buf = file->get_content ())
++	fprintf (out, ", content=(size=%zi)", buf->m_sz);
++      fprintf (out, ")");
+     }
+   else
+     fprintf (out, "(null)");
+diff --git a/gcc/libgdiagnostics.h b/gcc/libgdiagnostics.h
+index a6dc298f5b3c..25b6f4a97919 100644
+--- a/gcc/libgdiagnostics.h
++++ b/gcc/libgdiagnostics.h
+@@ -359,7 +359,7 @@ diagnostic_manager_write_patch (diagnostic_manager *diag_mgr,
+    See SARIF v2.1.0 Appendix J for suggested values for various
+    programmming languages.  */
+ 
+-extern const diagnostic_file *
++extern diagnostic_file *
+ diagnostic_manager_new_file (diagnostic_manager *diag_mgr,
+ 			     const char *name,
+ 			     const char *sarif_source_language)
+@@ -367,6 +367,17 @@ diagnostic_manager_new_file (diagnostic_manager *diag_mgr,
+   LIBGDIAGNOSTICS_PARAM_MUST_BE_NON_NULL (2)
+   LIBGDIAGNOSTICS_PARAM_CAN_BE_NULL (3);
+ 
++/* Populate the source-quoting cache for FILE, specifying the
++   given buffer as the content of the file (rather than
++   attempting to read the content from the filesystem).  */
++
++extern void
++diagnostic_file_set_buffered_content (diagnostic_file *file,
++				      const char *buf,
++				      size_t sz)
++  LIBGDIAGNOSTICS_PARAM_MUST_BE_NON_NULL (1)
++  LIBGDIAGNOSTICS_PARAM_MUST_BE_NON_NULL (2);
++
+ /* Write a representation of FILE to OUT, for debugging.  */
+ 
+ extern void
+diff --git a/gcc/libgdiagnostics.map b/gcc/libgdiagnostics.map
+index 52bff6a75b3e..76f35c8541cc 100644
+--- a/gcc/libgdiagnostics.map
++++ b/gcc/libgdiagnostics.map
+@@ -36,6 +36,7 @@ LIBGDIAGNOSTICS_ABI_0
+     diagnostic_manager_add_sarif_sink;
+     diagnostic_manager_write_patch;
+     diagnostic_manager_new_file;
++    diagnostic_file_set_buffered_content;
+     diagnostic_manager_debug_dump_file;
+     diagnostic_manager_new_location_from_file_and_line;
+     diagnostic_manager_new_location_from_file_line_column;
+diff --git a/gcc/libsarifreplay.cc b/gcc/libsarifreplay.cc
+index e8b5a55b9188..f1374ec4fc80 100644
+--- a/gcc/libsarifreplay.cc
++++ b/gcc/libsarifreplay.cc
+@@ -270,6 +270,10 @@ private:
+   enum status
+   handle_tool_obj (const json::object &tool_obj);
+ 
++  // "artifact" object (§3.24).  */
++  void
++  handle_artifact_obj (const json::object &artifact_obj);
++
+   // "result" object (§3.27)
+   enum status
+   handle_result_obj (const json::object &result_obj,
+@@ -546,7 +550,7 @@ private:
+   replayer_location_map m_json_location_map;
+ 
+   const json::object *m_driver_obj;
+-  const json::value *m_artifacts_arr;
++  const json::array *m_artifacts_arr;
+ };
+ 
+ static const char *
+@@ -766,10 +770,18 @@ sarif_replayer::handle_run_obj (const json::object &run_obj)
+   if (!m_driver_obj)
+     return status::err_invalid_sarif;
+ 
+-#if 0
+-  m_artifacts_arr = get_optional_property<json::array>
+-    (run_obj, property_spec_ref ("run", "artifacts","3.14.15"));
+-#endif
++  const property_spec_ref prop_artifacts ("run", "artifacts", "3.14.15");
++  m_artifacts_arr
++    = get_optional_property<json::array> (run_obj, prop_artifacts);
++  if (m_artifacts_arr)
++    for (auto element : *m_artifacts_arr)
++      {
++	if (const json::object *artifact_obj
++	    = require_object_for_element (*element, prop_artifacts))
++	  handle_artifact_obj (*artifact_obj);
++	else
++	  return status::err_invalid_sarif;
++      }
+ 
+   /* If present, run.results must be null or be an array.  */
+   const property_spec_ref prop_results ("run", "results", "3.14.23");
+@@ -805,6 +817,58 @@ sarif_replayer::handle_run_obj (const json::object &run_obj)
+   return status::ok;
+ }
+ 
++/* Process an artifact object (SARIF v2.1.0 section 3.24).
++   Create a libgdiagnostics::file for each artifact that has a uri,
++   effectively prepopulating a cache with source language and contents.  */
++
++void
++sarif_replayer::handle_artifact_obj (const json::object &artifact_obj)
++{
++  const property_spec_ref location ("artifact", "location", "3.24.2");
++  auto artifact_loc_obj
++    = get_optional_property<json::object> (artifact_obj, location);
++  if (!artifact_loc_obj)
++    return;
++
++  // we should now have an artifactLocation object (§3.4)
++
++  // 3.4.3 uri property
++  const property_spec_ref prop_uri ("artifactLocation", "uri", "3.4.3");
++  auto artifact_loc_uri
++    = get_optional_property<json::string> (*artifact_loc_obj, prop_uri);
++  if (!artifact_loc_uri)
++    return;
++
++  const char *sarif_source_language = nullptr;
++  const property_spec_ref prop_source_lang
++    ("artifact", "sourceLanguage", "3.24.10");
++  if (auto source_lang_jstr
++      = get_optional_property<json::string> (artifact_obj,
++					     prop_source_lang))
++    sarif_source_language = source_lang_jstr->get_string ();
++
++  /* Create the libgdiagnostics::file.  */
++  auto file = m_output_mgr.new_file (artifact_loc_uri->get_string (),
++				     sarif_source_language);
++
++  // Set contents, if available
++  const property_spec_ref prop_contents
++    ("artifact", "contents", "3.24.8");
++  if (auto content_obj
++      = get_optional_property<json::object> (artifact_obj,
++					     prop_contents))
++    {
++      // We should have an artifactContent object (§3.3)
++      const property_spec_ref prop_text
++	("artifactContent", "text", "3.3.2");
++      if (auto text_jstr
++	  = get_optional_property<json::string> (*content_obj,
++						 prop_text))
++	file.set_buffered_content (text_jstr->get_string (),
++				   text_jstr->get_length ());
++    }
++}
++
+ /* Process a tool object (SARIF v2.1.0 section 3.18).  */
+ 
+ enum status
+diff --git a/gcc/testsuite/sarif-replay.dg/2.1.0-valid/error-with-note.sarif b/gcc/testsuite/sarif-replay.dg/2.1.0-valid/error-with-note.sarif
+index 98df315cae4a..0d75a693cdf8 100644
+--- a/gcc/testsuite/sarif-replay.dg/2.1.0-valid/error-with-note.sarif
++++ b/gcc/testsuite/sarif-replay.dg/2.1.0-valid/error-with-note.sarif
+@@ -25,10 +25,13 @@
+ 
+ /* { dg-begin-multiline-output "" }
+ /this/does/not/exist/test.bas:2:8: error: 'GOTO' is considered harmful
++    2 |        GOTO label
++      |        ^~~~~~~~~~  
+    { dg-end-multiline-output "" } */
+ /* { dg-begin-multiline-output "" }
+ /this/does/not/exist/test.bas:1:1: note: this is the target of the 'GOTO'
++    1 | label: PRINT "hello world!"
++      | ^~~~~~
+    { dg-end-multiline-output "" } */
+ 
+-// TODO: quote the source
+ // TODO: trailing [error]
+diff --git a/gcc/testsuite/sarif-replay.dg/2.1.0-valid/signal-1.c.moved.sarif b/gcc/testsuite/sarif-replay.dg/2.1.0-valid/signal-1.c.moved.sarif
+new file mode 100644
+index 000000000000..eabab5a68cd3
+--- /dev/null
++++ b/gcc/testsuite/sarif-replay.dg/2.1.0-valid/signal-1.c.moved.sarif
+@@ -0,0 +1,220 @@
++/* This is signal-1.c, but the uri for the artifact does not exist,
++   to see if we can get sarif-replay to use the provided artifact
++   "contents".
++
++   As before, the dg directives were stripped out from the generated .sarif
++   to avoid confusing DejaGnu for this test.   */
++
++{"$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
++ "version": "2.1.0",
++ "runs": [{"tool": {"driver": {"name": "GNU C17",
++                               "fullName": "GNU C17 (GCC) version 15.0.0 20240709 (experimental) (x86_64-pc-linux-gnu)",
++                               "version": "15.0.0 20240709 (experimental)",
++                               "informationUri": "https://gcc.gnu.org/gcc-15/",
++                               "rules": [{"id": "-Wanalyzer-unsafe-call-within-signal-handler",
++                                          "helpUri": "https://gcc.gnu.org/onlinedocs/gcc/Static-Analyzer-Options.html#index-Wanalyzer-unsafe-call-within-signal-handler"}]}},
++           "taxonomies": [{"name": "CWE",
++                           "version": "4.7",
++                           "organization": "MITRE",
++                           "shortDescription": {"text": "The MITRE Common Weakness Enumeration"},
++                           "taxa": [{"id": "479",
++                                     "helpUri": "https://cwe.mitre.org/data/definitions/479.html"}]}],
++           "invocations": [{"executionSuccessful": true,
++                            "toolExecutionNotifications": []}],
++           "originalUriBaseIds": {"PWD": {"uri": "file:///THIS/DOES/NOT/EXIST/"}},
++           "artifacts": [{"location": {"uri": "signal-1.c",
++                                       "uriBaseId": "PWD"},
++                          "sourceLanguage": "c",
++                          "contents": {"text": "/* Example of a bad call within a signal handler.\n   'handler' calls 'custom_logger' which calls 'fprintf', and 'fprintf' is\n   not allowed from a signal handler.  */\n\n\n#include <stdio.h>\n#include <signal.h>\n\nextern void body_of_program(void);\n\nvoid custom_logger(const char *msg)\n{\n  fprintf(stderr, \"LOG: %s\", msg);\n}\n\nstatic void handler(int signum)\n{\n  custom_logger(\"got signal\");\n}\n\nint main(int argc, const char *argv)\n{\n  custom_logger(\"started\");\n\n  signal(SIGINT, handler);\n\n  body_of_program();\n\n  custom_logger(\"stopped\");\n\n  return 0;\n}\n"},
++                          "roles": ["analysisTarget",
++                                    "tracedFile"]}],
++           "results": [{"ruleId": "-Wanalyzer-unsafe-call-within-signal-handler",
++                        "taxa": [{"id": "479",
++                                  "toolComponent": {"name": "cwe"}}],
++                        "properties": {"gcc/analyzer/saved_diagnostic/sm": "signal",
++                                       "gcc/analyzer/saved_diagnostic/enode": 57,
++                                       "gcc/analyzer/saved_diagnostic/snode": 11,
++                                       "gcc/analyzer/saved_diagnostic/state": "in_signal_handler",
++                                       "gcc/analyzer/saved_diagnostic/idx": 0},
++                        "level": "warning",
++                        "message": {"text": "call to ‘fprintf’ from within signal handler"},
++                        "locations": [{"physicalLocation": {"artifactLocation": {"uri": "signal-1.c",
++                                                                                 "uriBaseId": "PWD"},
++                                                            "region": {"startLine": 13,
++                                                                       "startColumn": 3,
++                                                                       "endColumn": 34},
++                                                            "contextRegion": {"startLine": 13,
++                                                                              "snippet": {"text": "  fprintf(stderr, \"LOG: %s\", msg);\n"}}},
++                                       "logicalLocations": [{"name": "custom_logger",
++                                                             "fullyQualifiedName": "custom_logger",
++                                                             "decoratedName": "custom_logger",
++                                                             "kind": "function"}]}],
++                        "codeFlows": [{"threadFlows": [{"id": "main",
++                                                        "locations": [{"properties": {"gcc/analyzer/checker_event/emission_id": "(1)",
++                                                                                      "gcc/analyzer/checker_event/kind": "EK_FUNCTION_ENTRY"},
++                                                                       "location": {"physicalLocation": {"artifactLocation": {"uri": "signal-1.c",
++                                                                                                                              "uriBaseId": "PWD"},
++                                                                                                         "region": {"startLine": 21,
++                                                                                                                    "startColumn": 5,
++                                                                                                                    "endColumn": 9},
++                                                                                                         "contextRegion": {"startLine": 21,
++                                                                                                                           "snippet": {"text": "int main(int argc, const char *argv)\n"}}},
++                                                                                    "logicalLocations": [{"name": "main",
++                                                                                                          "fullyQualifiedName": "main",
++                                                                                                          "decoratedName": "main",
++                                                                                                          "kind": "function"}],
++                                                                                    "message": {"text": "entry to ‘main’"}},
++                                                                       "kinds": ["enter",
++                                                                                 "function"],
++                                                                       "nestingLevel": 1,
++                                                                       "executionOrder": 1},
++                                                                      {"properties": {"gcc/analyzer/checker_event/emission_id": "(2)",
++                                                                                      "gcc/analyzer/checker_event/kind": "EK_STATE_CHANGE"},
++                                                                       "location": {"physicalLocation": {"artifactLocation": {"uri": "signal-1.c",
++                                                                                                                              "uriBaseId": "PWD"},
++                                                                                                         "region": {"startLine": 25,
++                                                                                                                    "startColumn": 3,
++                                                                                                                    "endColumn": 26},
++                                                                                                         "contextRegion": {"startLine": 25,
++                                                                                                                           "snippet": {"text": "  signal(SIGINT, handler);\n"}}},
++                                                                                    "logicalLocations": [{"name": "main",
++                                                                                                          "fullyQualifiedName": "main",
++                                                                                                          "decoratedName": "main",
++                                                                                                          "kind": "function"}],
++                                                                                    "message": {"text": "registering ‘handler’ as signal handler"}},
++                                                                       "nestingLevel": 1,
++                                                                       "executionOrder": 2},
++                                                                      {"properties": {"gcc/analyzer/checker_event/emission_id": "(3)",
++                                                                                      "gcc/analyzer/checker_event/kind": "EK_CUSTOM"},
++                                                                       "location": {"message": {"text": "later on, when the signal is delivered to the process"}},
++                                                                       "nestingLevel": 0,
++                                                                       "executionOrder": 3},
++                                                                      {"properties": {"gcc/analyzer/checker_event/emission_id": "(4)",
++                                                                                      "gcc/analyzer/checker_event/kind": "EK_FUNCTION_ENTRY"},
++                                                                       "location": {"physicalLocation": {"artifactLocation": {"uri": "signal-1.c",
++                                                                                                                              "uriBaseId": "PWD"},
++                                                                                                         "region": {"startLine": 16,
++                                                                                                                    "startColumn": 13,
++                                                                                                                    "endColumn": 20},
++                                                                                                         "contextRegion": {"startLine": 16,
++                                                                                                                           "snippet": {"text": "static void handler(int signum)\n"}}},
++                                                                                    "logicalLocations": [{"name": "handler",
++                                                                                                          "fullyQualifiedName": "handler",
++                                                                                                          "decoratedName": "handler",
++                                                                                                          "kind": "function"}],
++                                                                                    "message": {"text": "entry to ‘handler’"}},
++                                                                       "kinds": ["enter",
++                                                                                 "function"],
++                                                                       "nestingLevel": 1,
++                                                                       "executionOrder": 4},
++                                                                      {"properties": {"gcc/analyzer/checker_event/emission_id": "(5)",
++                                                                                      "gcc/analyzer/checker_event/kind": "EK_CALL_EDGE",
++                                                                                      "gcc/analyzer/superedge_event/superedge": {"kind": "SUPEREDGE_CALL",
++                                                                                                                                 "src_idx": 7,
++                                                                                                                                 "dst_idx": 10,
++                                                                                                                                 "desc": "call"}},
++                                                                       "location": {"physicalLocation": {"artifactLocation": {"uri": "signal-1.c",
++                                                                                                                              "uriBaseId": "PWD"},
++                                                                                                         "region": {"startLine": 18,
++                                                                                                                    "startColumn": 3,
++                                                                                                                    "endColumn": 30},
++                                                                                                         "contextRegion": {"startLine": 18,
++                                                                                                                           "snippet": {"text": "  custom_logger(\"got signal\");\n"}}},
++                                                                                    "logicalLocations": [{"name": "handler",
++                                                                                                          "fullyQualifiedName": "handler",
++                                                                                                          "decoratedName": "handler",
++                                                                                                          "kind": "function"}],
++                                                                                    "message": {"text": "calling ‘custom_logger’ from ‘handler’"}},
++                                                                       "kinds": ["call",
++                                                                                 "function"],
++                                                                       "nestingLevel": 1,
++                                                                       "executionOrder": 5},
++                                                                      {"properties": {"gcc/analyzer/checker_event/emission_id": "(6)",
++                                                                                      "gcc/analyzer/checker_event/kind": "EK_FUNCTION_ENTRY"},
++                                                                       "location": {"physicalLocation": {"artifactLocation": {"uri": "signal-1.c",
++                                                                                                                              "uriBaseId": "PWD"},
++                                                                                                         "region": {"startLine": 11,
++                                                                                                                    "startColumn": 6,
++                                                                                                                    "endColumn": 19},
++                                                                                                         "contextRegion": {"startLine": 11,
++                                                                                                                           "snippet": {"text": "void custom_logger(const char *msg)\n"}}},
++                                                                                    "logicalLocations": [{"name": "custom_logger",
++                                                                                                          "fullyQualifiedName": "custom_logger",
++                                                                                                          "decoratedName": "custom_logger",
++                                                                                                          "kind": "function"}],
++                                                                                    "message": {"text": "entry to ‘custom_logger’"}},
++                                                                       "kinds": ["enter",
++                                                                                 "function"],
++                                                                       "nestingLevel": 2,
++                                                                       "executionOrder": 6},
++                                                                      {"properties": {"gcc/analyzer/checker_event/emission_id": "(7)",
++                                                                                      "gcc/analyzer/checker_event/kind": "EK_WARNING"},
++                                                                       "location": {"physicalLocation": {"artifactLocation": {"uri": "signal-1.c",
++                                                                                                                              "uriBaseId": "PWD"},
++                                                                                                         "region": {"startLine": 13,
++                                                                                                                    "startColumn": 3,
++                                                                                                                    "endColumn": 34},
++                                                                                                         "contextRegion": {"startLine": 13,
++                                                                                                                           "snippet": {"text": "  fprintf(stderr, \"LOG: %s\", msg);\n"}}},
++                                                                                    "logicalLocations": [{"name": "custom_logger",
++                                                                                                          "fullyQualifiedName": "custom_logger",
++                                                                                                          "decoratedName": "custom_logger",
++                                                                                                          "kind": "function"}],
++                                                                                    "message": {"text": "call to ‘fprintf’ from within signal handler"}},
++                                                                       "kinds": ["danger"],
++                                                                       "nestingLevel": 2,
++                                                                       "executionOrder": 7}]}]}]}]}]}
++
++// TODO: show the CWE
++/* { dg-begin-multiline-output "" }
++signal-1.c:13:3: warning: call to ‘fprintf’ from within signal handler [-Wanalyzer-unsafe-call-within-signal-handler]
++   13 |   fprintf(stderr, "LOG: %s", msg);
++      |   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
++  'main': event 1
++    |
++    |   21 | int main(int argc, const char *argv)
++    |      |     ^~~~~
++    |      |     |
++    |      |     (1) entry to ‘main’
++    |
++  'main': event 2
++    |
++    |   25 |   signal(SIGINT, handler);
++    |      |   ^~~~~~~~~~~~~~~~~~~~~~~~
++    |      |   |
++    |      |   (2) registering ‘handler’ as signal handler
++    |
++  event 3
++    |
++    |GNU C17:
++    | (3): later on, when the signal is delivered to the process
++    |
++    +--> 'handler': event 4
++           |
++           |   16 | static void handler(int signum)
++           |      |             ^~~~~~~~
++           |      |             |
++           |      |             (4) entry to ‘handler’
++           |
++         'handler': event 5
++           |
++           |   18 |   custom_logger("got signal");
++           |      |   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~
++           |      |   |
++           |      |   (5) calling ‘custom_logger’ from ‘handler’
++           |
++           +--> 'custom_logger': event 6
++                  |
++                  |   11 | void custom_logger(const char *msg)
++                  |      |      ^~~~~~~~~~~~~~
++                  |      |      |
++                  |      |      (6) entry to ‘custom_logger’
++                  |
++                'custom_logger': event 7
++                  |
++                  |   13 |   fprintf(stderr, "LOG: %s", msg);
++                  |      |   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
++                  |      |   |
++                  |      |   (7) call to ‘fprintf’ from within signal handler
++                  |
++   { dg-end-multiline-output "" } */
+diff --git a/gcc/testsuite/sarif-replay.dg/2.1.0-valid/signal-1.c.sarif b/gcc/testsuite/sarif-replay.dg/2.1.0-valid/signal-1.c.sarif
+index 6b76bc0bc594..81ac149e1253 100644
+--- a/gcc/testsuite/sarif-replay.dg/2.1.0-valid/signal-1.c.sarif
++++ b/gcc/testsuite/sarif-replay.dg/2.1.0-valid/signal-1.c.sarif
+@@ -163,15 +163,24 @@
+                                                                        "nestingLevel": 2,
+                                                                        "executionOrder": 7}]}]}]}]}]}
+ 
+-// TODO: replay the source code
+ // TODO: show the CWE
+ /* { dg-begin-multiline-output "" }
+ ../../src/gcc/testsuite/gcc.dg/analyzer/signal-1.c:13:3: warning: call to ‘fprintf’ from within signal handler [-Wanalyzer-unsafe-call-within-signal-handler]
++   13 |   fprintf(stderr, "LOG: %s", msg);
++      |   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   'main': event 1
+     |
++    |   21 | int main(int argc, const char *argv)
++    |      |     ^~~~~
++    |      |     |
++    |      |     (1) entry to ‘main’
+     |
+   'main': event 2
+     |
++    |   25 |   signal(SIGINT, handler);
++    |      |   ^~~~~~~~~~~~~~~~~~~~~~~~
++    |      |   |
++    |      |   (2) registering ‘handler’ as signal handler
+     |
+   event 3
+     |
+@@ -180,14 +189,30 @@
+     |
+     +--> 'handler': event 4
+            |
++           |   16 | static void handler(int signum)
++           |      |             ^~~~~~~~
++           |      |             |
++           |      |             (4) entry to ‘handler’
+            |
+          'handler': event 5
+            |
++           |   18 |   custom_logger("got signal");
++           |      |   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~
++           |      |   |
++           |      |   (5) calling ‘custom_logger’ from ‘handler’
+            |
+            +--> 'custom_logger': event 6
+                   |
++                  |   11 | void custom_logger(const char *msg)
++                  |      |      ^~~~~~~~~~~~~~
++                  |      |      |
++                  |      |      (6) entry to ‘custom_logger’
+                   |
+                 'custom_logger': event 7
+                   |
++                  |   13 |   fprintf(stderr, "LOG: %s", msg);
++                  |      |   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
++                  |      |   |
++                  |      |   (7) call to ‘fprintf’ from within signal handler
+                   |
+    { dg-end-multiline-output "" } */
+-- 
+2.26.3
+

@@ -18,12 +18,17 @@
 
 Name:		gcc-latest
 Version:	VERSION
-Release:	PKGREL.SNAPINFO.pr116613.v0.155%{?dist}
+Release:	PKGREL.SNAPINFO.pr116613%{?dist}
 Summary:	Weekly snapshot of GCC trunk
 
 License:	GPLv3+ and GPLv3+ with exceptions and GPLv2+ with exceptions and LGPLv2+ and BSD
 URL:		https://gcc.gnu.org/
 Source0:	SOURCE_URL
+Patch1: 0001-diagnostics-implement-file_cache-dump.patch
+Patch2: 0002-diagnostics-move-libgdiagnostics-dc-from-sinks-into-.patch
+Patch3: 0003-sarif-replay-quote-source-from-artifact-contents-PR1.patch
+Patch4: 0004-libgdiagnostics-consolidate-logical-locations.patch
+Patch5: 0005-sarif-replay-handle-embedded-links-3.11.6.patch
 
 BuildRequires:	gcc, gcc-c++
 BuildRequires:	binutils >= 2.24
@@ -46,15 +51,6 @@ Requires:	glibc >= 2.17
 
 Provides:	bundled(libiberty)
 
-Patch1: 0001-pushed-Implement-Fortran-diagnostic-buffering-for-no.patch
-Patch2: 0002-pushed-jit-reset-state-in-varasm.cc-PR117275.patch
-Patch3: 0003-pushed-Add-comment-about-pp_format-to-diagnostic_con.patch
-Patch4: 0004-pushed-Use-unique_ptr-in-more-places-in-pretty_print.patch
-Patch5: 0005-analyzer-avoid-implicit-use-of-global_dc-s-pretty_pr.patch
-Patch6: 0006-FIXME-WIP-on-fdiagnostics-add-output-PR116613.patch
-Patch7: 0007-FIXME-also-add-fdiagnostics-set-output.patch
-Patch8: 0008-FIXME-replace-fdiagnostics-format-sarif-file-2.2-pre.patch
-
 %description
 GNU C and C++ compilers built from a weekly development snapshot.
 
@@ -65,9 +61,7 @@ GNU C and C++ compilers built from a weekly development snapshot.
 %patch 3 -p1
 %patch 4 -p1
 %patch 5 -p1
-%patch 6 -p1
-%patch 7 -p1
-%patch 8 -p1
+
 
 %build
 CC=gcc
@@ -115,7 +109,8 @@ CC="$CC" CXX="$CXX" CFLAGS="$OPT_FLAGS" CXXFLAGS="$OPT_FLAGS" \
 %ifarch x86_64 && 0%{?rhel} > 8
   --with-arch_64=x86-64-v2 \
 %endif
-  --with-bugurl=https://gcc.gnu.org/bugzilla
+  --with-bugurl=https://gcc.gnu.org/bugzilla \
+  --enable-libgdiagnostics --enable-host-shared
 
 make %{?_smp_mflags}
 
@@ -137,6 +132,11 @@ done
 
 
 %changelog
+* Thu Dec 19 2024 David Malcolm <dmalcolm@redhat.com> - 15.0.0-4.pr116613
+- patches merged upstream; drop them
+- enable libgdiagnostics (which requires --enable-host-shared)
+- add patches r15-6282 through r15-6286 (sarif-replay improvements)
+
 * Thu Oct 24 2024 David Malcolm <dmalcolm@redhat.com> - 15.0.0-4.pr116613.v0.155
 - update work-in-progress patches for PR 116613
 - rebase to latest snapshot

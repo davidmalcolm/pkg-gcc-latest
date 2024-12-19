@@ -1,0 +1,127 @@
+From 9e5b04c57b0033459087a70af5bce319cf09053e Mon Sep 17 00:00:00 2001
+From: David Malcolm <dmalcolm@redhat.com>
+Date: Thu, 12 Dec 2024 13:49:22 -0500
+Subject: [pushed: r15-6282] diagnostics: implement file_cache::dump
+
+This is purely for use when debugging.
+
+Successfully bootstrapped & regrtested on x86_64-pc-linux-gnu.
+Pushed to trunk as r15-6282-ge55cfebd0016e4.
+
+gcc/ChangeLog:
+	* diagnostic.cc (diagnostic_context::dump): Dump m_file_cache.
+	* input.cc (file_cache_slot::dump): New decls and implementations.
+	(file_cache::dump): New.
+	* input.h (file_cache::dump): New decl.
+
+Signed-off-by: David Malcolm <dmalcolm@redhat.com>
+---
+ gcc/diagnostic.cc |  5 +++++
+ gcc/input.cc      | 46 ++++++++++++++++++++++++++++++++++++++++++++++
+ gcc/input.h       |  3 +++
+ 3 files changed, 54 insertions(+)
+
+diff --git a/gcc/diagnostic.cc b/gcc/diagnostic.cc
+index 054a61d8afe7..610914b267f9 100644
+--- a/gcc/diagnostic.cc
++++ b/gcc/diagnostic.cc
+@@ -449,6 +449,11 @@ diagnostic_context::dump (FILE *out) const
+     m_diagnostic_buffer->dump (out, 4);
+   else
+     fprintf (out, "    (none):\n");
++  fprintf (out, "  file cache:\n");
++  if (m_file_cache)
++    m_file_cache->dump (out, 4);
++  else
++    fprintf (out, "    (none):\n");
+ }
+ 
+ /* Return true if sufficiently severe diagnostics have been seen that
+diff --git a/gcc/input.cc b/gcc/input.cc
+index 7fc683db23f1..b4911581924d 100644
+--- a/gcc/input.cc
++++ b/gcc/input.cc
+@@ -57,6 +57,9 @@ public:
+   file_cache_slot ();
+   ~file_cache_slot ();
+ 
++  void dump (FILE *out, int indent) const;
++  void DEBUG_FUNCTION dump () const { dump (stderr, 0); }
++
+   bool read_line_num (size_t line_num,
+ 		      char ** line, ssize_t *line_len);
+ 
+@@ -524,6 +527,22 @@ file_cache::~file_cache ()
+   delete[] m_file_slots;
+ }
+ 
++void
++file_cache::dump (FILE *out, int indent) const
++{
++  for (size_t i = 0; i < num_file_slots; ++i)
++    {
++      fprintf (out, "%*sslot[%i]:\n", indent, "", (int)i);
++      m_file_slots[i].dump (out, indent + 2);
++    }
++}
++
++void
++file_cache::dump () const
++{
++  dump (stderr, 0);
++}
++
+ /* Lookup the cache used for the content of a given file accessed by
+    caret diagnostic.  If no cached file was found, create a new cache
+    for this file, add it to the array of cached file and return
+@@ -570,6 +589,33 @@ file_cache_slot::~file_cache_slot ()
+   m_line_record.release ();
+ }
+ 
++void
++file_cache_slot::dump (FILE *out, int indent) const
++{
++  if (!m_fp)
++    {
++      fprintf (out, "%*s(unused)\n", indent, "");
++      return;
++    }
++  fprintf (out, "%*sfile_path: %s\n", indent, "", m_file_path);
++  fprintf (out, "%*sneeds_read_p: %i\n", indent, "", (int)needs_read_p ());
++  fprintf (out, "%*sneeds_grow_p: %i\n", indent, "", (int)needs_grow_p ());
++  fprintf (out, "%*suse_count: %i\n", indent, "", m_use_count);
++  fprintf (out, "%*ssize: %zi\n", indent, "", m_size);
++  fprintf (out, "%*snb_read: %zi\n", indent, "", m_nb_read);
++  fprintf (out, "%*sstart_line_idx: %zi\n", indent, "", m_line_start_idx);
++  fprintf (out, "%*sline_num: %zi\n", indent, "", m_line_num);
++  fprintf (out, "%*stotal_lines: %zi\n", indent, "", m_total_lines);
++  fprintf (out, "%*smissing_trailing_newline: %i\n",
++	   indent, "", (int)m_missing_trailing_newline);
++  fprintf (out, "%*sline records (%i):\n",
++	   indent, "", m_line_record.length ());
++  for (auto &line : m_line_record)
++    fprintf (out, "%*sline %zi: byte offsets: %zi-%zi\n",
++	     indent + 2, "",
++	     line.line_num, line.start_pos, line.end_pos);
++}
++
+ /* Returns TRUE iff the cache would need to be filled with data coming
+    from the file.  That is, either the cache is empty or full or the
+    current line is empty.  Note that if the cache is full, it would
+diff --git a/gcc/input.h b/gcc/input.h
+index a5863eb9e091..fb3ef120607d 100644
+--- a/gcc/input.h
++++ b/gcc/input.h
+@@ -138,6 +138,9 @@ class file_cache
+   file_cache ();
+   ~file_cache ();
+ 
++  void dump (FILE *out, int indent) const;
++  void DEBUG_FUNCTION dump () const;
++
+   file_cache_slot *lookup_or_add_file (const char *file_path);
+   void forcibly_evict_file (const char *file_path);
+ 
+-- 
+2.26.3
+

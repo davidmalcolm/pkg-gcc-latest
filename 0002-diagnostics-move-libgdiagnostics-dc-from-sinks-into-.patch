@@ -1,0 +1,951 @@
+From 7f607d7f5527f4b488d004ef093cb6854bd4d79b Mon Sep 17 00:00:00 2001
+From: David Malcolm <dmalcolm@redhat.com>
+Date: Tue, 10 Dec 2024 10:07:42 -0500
+Subject: [pushed: r15-6283] diagnostics: move libgdiagnostics dc from sinks into
+ diagnostic_manager
+
+libgdiagnostics was written before the fixes for PR other/116613 allowed
+a diagnostic_context to have multiple output sinks.
+
+Hence each libgdiagnostics sink had its own diagnostic_context with just
+one diagnostic_output_format.
+
+This wart is no longer necessary and makes it harder to move state
+into the manager/context; in particular for quoting source code
+from the .sarif file (PR sarif-replay/117943).
+
+Simplify, by making libgdiagnostics' implementation more similar to
+GCC's implementation, by moving the diagnostic_context from sink into
+diagnostic_manager.
+
+Doing so requires generalizing where the
+diagnostic_source_printing_options comes from in class
+diagnostic_text_output_format: for GCC we use
+the instance within the diagnostic_context, whereas for
+libgdiagnostics each diagnostic_text_sink has its own instance.
+
+No functional change intended.
+
+Successfully bootstrapped & regrtested on x86_64-pc-linux-gnu.
+Pushed to trunk as r15-6283-gea7da640cf234e.
+
+gcc/c-family/ChangeLog:
+	PR sarif-replay/117943
+	* c-format.cc (selftest::test_type_mismatch_range_labels): Use
+	dc.m_source_printing.
+	* c-opts.cc (c_diagnostic_text_finalizer): Use source-printing
+	options from text_output.
+
+gcc/cp/ChangeLog:
+	PR sarif-replay/117943
+	* error.cc (auto_context_line::~auto_context_line): Use
+	source-printing options from text_output.
+
+gcc/ChangeLog:
+	PR sarif-replay/117943
+	* diagnostic-format-text.cc
+	(diagnostic_text_output_format::append_note): Use source-printing
+	options from text_output.
+	(diagnostic_text_output_format::update_printer): Copy
+	source-printing options from dc.
+	(default_diagnostic_text_finalizer): Use source-printing
+	options from text_output.
+	* diagnostic-format-text.h
+	(diagnostic_text_output_format::diagnostic_text_output_format):
+	Add optional diagnostic_source_printing_options param, using
+	the context's if null.
+	(diagnostic_text_output_format::get_source_printing_options): New
+	accessor.
+	(diagnostic_text_output_format::m_source_printing): New field.
+	* diagnostic-path.cc (event_range::print): Use source-printing
+	options from text_output.
+	(selftest::test_interprocedural_path_1): Use source-printing
+	options from dc.
+	* diagnostic-show-locus.cc
+	(gcc_rich_location::add_location_if_nearby): Likewise.
+	(diagnostic_context::maybe_show_locus): Add "opts" param
+	and use in place of m_source_printing.  Pass it to source_policy
+	ctor.
+	(diagnostic_source_print_policy::diagnostic_source_print_policy):
+	Add overload taking a const diagnostic_source_printing_options &.
+	* diagnostic.cc (diagnostic_context::initialize): Pass nullptr
+	for source options when creating text sink, so that it uses
+	the dc's options.
+	(diagnostic_context::dump): Add an "output sinks:" heading and
+	print "(none)" if there aren't any.
+	(diagnostic_context::set_output_format): Split out code into...
+	(diagnostic_context::remove_all_output_sinks): ...this new
+	function.
+	* diagnostic.h
+	(diagnostic_source_print_policy::diagnostic_source_print_policy):
+	Add overload taking a const diagnostic_source_printing_options &.
+	(diagnostic_context::maybe_show_locus): Add "opts" param.
+	(diagnostic_context::remove_all_output_sinks): New decl.
+	(diagnostic_context::m_source_printing): New field.
+	(diagnostic_show_locus): Add "opts" param and pass to
+	maybe_show_locus.
+	* libgdiagnostics.cc (sink::~sink): Delete.
+	(sink::begin_group): Delete.
+	(sink::end_group): Delete.
+	(sink::emit): Delete.
+	(sink::m_dc): Drop field.
+	(diagnostic_text_sink::on_begin_text_diagnostic): Delete.
+	(diagnostic_text_sink::get_source_printing_options): Use
+	m_souece_printing.
+	(diagnostic_text_sink::m_current_logical_loc): Drop field.
+	(diagnostic_text_sink::m_inner_sink): New field.
+	(diagnostic_text_sink::m_source_printing): New field.
+	(diagnostic_manager::diagnostic_manager): Update for changes
+	to fields.  Initialize m_dc.
+	(diagnostic_manager::~diagnostic_manager): Call diagnostic_finish.
+	(diagnostic_manager::get_file_cache): Drop.
+	(diagnostic_manager::get_dc): New accessor.
+	(diagnostic_manager::begin_group): Reimplement.
+	(diagnostic_manager::end_group): Reimplement.
+	(diagnostic_manager::get_prev_diag_logical_loc): New accessor.
+	(diagnostic_manager::m_dc): New field.
+	(diagnostic_manager::m_file_cache): Drop field.
+	(diagnostic_manager::m_edit_context): Convert to a std::unique_ptr
+	so that object can be constructed after m_dc is initialized.
+	(diagnostic_manager::m_prev_diag_logical_loc): New field.
+	(diagnostic_text_sink::diagnostic_text_sink): Reimplement.
+	(get_color_rule): Delete.
+	(diagnostic_text_sink::set_colorize): Reimplement.
+	(diagnostic_text_sink::text_starter): New.
+	(sarif_sink::sarif_sink): Reimplement.
+	(diagnostic_manager::write_patch): Update for change to
+	m_edit_context.
+	(diagnostic_manager::emit): Update now that each sink has a
+	corresponding diagnostic_output_format object within m_dc.
+
+gcc/fortran/ChangeLog:
+	PR sarif-replay/117943
+	* error.cc (gfc_diagnostic_text_starter): Use source-printing
+	options from text_output.
+
+gcc/testsuite/ChangeLog:
+	PR sarif-replay/117943
+	* gcc.dg/plugin/diagnostic_plugin_test_show_locus.cc
+	(custom_diagnostic_text_finalizer): Use source-printing options
+	from text_output.
+	* gcc.dg/plugin/diagnostic_plugin_xhtml_format.cc
+	(xhtml_builder::make_element_for_diagnostic): Use source-printing
+	options from diagnostic_context.
+	* gcc.dg/plugin/expensive_selftests_plugin.cc (test_richloc):
+	Likewise.
+
+Signed-off-by: David Malcolm <dmalcolm@redhat.com>
+---
+ gcc/c-family/c-format.cc                      |   4 +-
+ gcc/c-family/c-opts.cc                        |   1 +
+ gcc/cp/error.cc                               |   8 +-
+ gcc/diagnostic-format-text.cc                 |   6 +-
+ gcc/diagnostic-format-text.h                  |  15 +
+ gcc/diagnostic-path.cc                        |   8 +-
+ gcc/diagnostic-show-locus.cc                  |  20 +-
+ gcc/diagnostic.cc                             |  25 +-
+ gcc/diagnostic.h                              |   8 +-
+ gcc/fortran/error.cc                          |   4 +-
+ gcc/libgdiagnostics.cc                        | 273 ++++++++----------
+ .../diagnostic_plugin_test_show_locus.cc      |   1 +
+ .../plugin/diagnostic_plugin_xhtml_format.cc  |   3 +-
+ .../plugin/expensive_selftests_plugin.cc      |   3 +-
+ 14 files changed, 207 insertions(+), 172 deletions(-)
+
+diff --git a/gcc/c-family/c-format.cc b/gcc/c-family/c-format.cc
+index 5b3a856ac1f1..a213b06e19ca 100644
+--- a/gcc/c-family/c-format.cc
++++ b/gcc/c-family/c-format.cc
+@@ -5578,7 +5578,9 @@ test_type_mismatch_range_labels ()
+   richloc.add_range (param, SHOW_RANGE_WITHOUT_CARET, &param_label);
+ 
+   test_diagnostic_context dc;
+-  diagnostic_show_locus (&dc, &richloc, DK_ERROR, dc.get_reference_printer ());
++  diagnostic_show_locus (&dc,
++			 dc.m_source_printing,
++			 &richloc, DK_ERROR, dc.get_reference_printer ());
+   if (c_dialect_cxx ())
+     /* "char*", without a space.  */
+     ASSERT_STREQ ("   printf (\"msg: %i\\n\", msg);\n"
+diff --git a/gcc/c-family/c-opts.cc b/gcc/c-family/c-opts.cc
+index 7d139a7adf31..0e81e3413152 100644
+--- a/gcc/c-family/c-opts.cc
++++ b/gcc/c-family/c-opts.cc
+@@ -178,6 +178,7 @@ c_diagnostic_text_finalizer (diagnostic_text_output_format &text_output,
+   pp_set_prefix (pp, text_output.build_indent_prefix (false));
+   pp_newline (pp);
+   diagnostic_show_locus (&text_output.get_context (),
++			 text_output.get_source_printing_options (),
+ 			 diagnostic->richloc, diagnostic->kind, pp);
+   /* By default print macro expansion contexts in the diagnostic
+      finalizer -- for tokens resulting from macro expansion.  */
+diff --git a/gcc/cp/error.cc b/gcc/cp/error.cc
+index 3b22a8f40723..4736f4875eaf 100644
+--- a/gcc/cp/error.cc
++++ b/gcc/cp/error.cc
+@@ -3894,7 +3894,9 @@ public:
+ 	    char *saved_prefix = pp_take_prefix (pp);
+ 	    pp_set_prefix (pp, indent);
+ 	    gcc_rich_location rich_loc (m_loc);
+-	    diagnostic_show_locus (&m_text_output.get_context (), &rich_loc,
++	    diagnostic_show_locus (&m_text_output.get_context (),
++				   m_text_output.get_source_printing_options (),
++				   &rich_loc,
+ 				   DK_NOTE, pp);
+ 	    pp_set_prefix (pp, saved_prefix);
+ 	  }
+@@ -3904,7 +3906,9 @@ public:
+ 	char *saved_prefix = pp_take_prefix (pp);
+ 	pp_set_prefix (pp, nullptr);
+ 	gcc_rich_location rich_loc (m_loc);
+-	diagnostic_show_locus (&m_text_output.get_context (), &rich_loc,
++	diagnostic_show_locus (&m_text_output.get_context (),
++			       m_text_output.get_source_printing_options (),
++			       &rich_loc,
+ 			       DK_NOTE, pp);
+ 	pp_set_prefix (pp, saved_prefix);
+       }
+diff --git a/gcc/diagnostic-format-text.cc b/gcc/diagnostic-format-text.cc
+index 856d25e8482c..0f40061bc04a 100644
+--- a/gcc/diagnostic-format-text.cc
++++ b/gcc/diagnostic-format-text.cc
+@@ -432,7 +432,8 @@ diagnostic_text_output_format::append_note (location_t location,
+   pp_destroy_prefix (pp);
+   pp_set_prefix (pp, saved_prefix);
+   pp_newline (pp);
+-  diagnostic_show_locus (context, &richloc, DK_NOTE, pp);
++  diagnostic_show_locus (context, get_source_printing_options (),
++			 &richloc, DK_NOTE, pp);
+   va_end (ap);
+ }
+ 
+@@ -458,6 +459,8 @@ update_printer ()
+   pp_show_color (m_printer.get ()) = show_color;
+   m_printer->set_url_format (url_format);
+   // ...etc
++
++  m_source_printing = get_context ().m_source_printing;
+ }
+ 
+ /* If DIAGNOSTIC has a CWE identifier, print it.
+@@ -720,6 +723,7 @@ default_diagnostic_text_finalizer (diagnostic_text_output_format &text_output,
+   pp_set_prefix (pp, NULL);
+   pp_newline (pp);
+   diagnostic_show_locus (&text_output.get_context (),
++			 text_output.get_source_printing_options (),
+ 			 diagnostic->richloc, diagnostic->kind, pp);
+   pp_set_prefix (pp, saved_prefix);
+   pp_flush (pp);
+diff --git a/gcc/diagnostic-format-text.h b/gcc/diagnostic-format-text.h
+index 2ca3bb227ef7..e5084b895215 100644
+--- a/gcc/diagnostic-format-text.h
++++ b/gcc/diagnostic-format-text.h
+@@ -33,12 +33,16 @@ class diagnostic_text_output_format : public diagnostic_output_format
+ {
+ public:
+   diagnostic_text_output_format (diagnostic_context &context,
++				 diagnostic_source_printing_options *source_printing = nullptr,
+ 				 bool follows_reference_printer = false)
+   : diagnostic_output_format (context),
+     m_saved_output_buffer (nullptr),
+     m_column_policy (context),
+     m_last_module (nullptr),
+     m_includes_seen (nullptr),
++    m_source_printing (source_printing
++		       ? *source_printing
++		       : context.m_source_printing),
+     m_follows_reference_printer (follows_reference_printer),
+     m_show_nesting (false),
+     m_show_nesting_levels (false)
+@@ -105,6 +109,15 @@ public:
+ 
+   label_text get_location_text (const expanded_location &s) const;
+ 
++  diagnostic_source_printing_options &get_source_printing_options ()
++  {
++    return m_source_printing;
++  }
++  const diagnostic_source_printing_options &get_source_printing_options () const
++  {
++    return m_source_printing;
++  }
++
+ protected:
+   void print_any_cwe (const diagnostic_info &diagnostic);
+   void print_any_rules (const diagnostic_info &diagnostic);
+@@ -126,6 +139,8 @@ protected:
+      include path for.  */
+   hash_set<location_t, false, location_hash> *m_includes_seen;
+ 
++  diagnostic_source_printing_options &m_source_printing;
++
+   /* If true, this is the initial default text output format created
+      when the diagnostic_context was created, and, in particular, before
+      initializations of color and m_url_format.  Hence this should follow
+diff --git a/gcc/diagnostic-path.cc b/gcc/diagnostic-path.cc
+index fe187bd5d4fc..27dfba15d87c 100644
+--- a/gcc/diagnostic-path.cc
++++ b/gcc/diagnostic-path.cc
+@@ -689,7 +689,8 @@ struct event_range
+       }
+ 
+     /* Call diagnostic_show_locus to show the events using labels.  */
+-    diagnostic_show_locus (&dc, &m_richloc, DK_DIAGNOSTIC_PATH, &pp,
++    diagnostic_show_locus (&dc, text_output.get_source_printing_options (),
++			   &m_richloc, DK_DIAGNOSTIC_PATH, &pp,
+ 			   effect_info);
+ 
+     /* If we have a macro expansion, show the expansion to the user.  */
+@@ -1194,8 +1195,7 @@ diagnostic_text_output_format::print_path (const diagnostic_path &path)
+ 	pretty_printer *const pp = get_printer ();
+ 	const bool check_rich_locations = true;
+ 	const bool colorize = pp_show_color (pp);
+-	const bool show_event_links
+-	  = get_context ().m_source_printing.show_event_links_p;
++	const bool show_event_links = m_source_printing.show_event_links_p;
+ 	path_summary summary (policy,
+ 			      *pp,
+ 			      path,
+@@ -1307,7 +1307,7 @@ test_interprocedural_path_1 (pretty_printer *event_pp)
+ 
+   {
+     test_diagnostic_context dc;
+-    diagnostic_text_output_format text_output (dc, false);
++    diagnostic_text_output_format text_output (dc, nullptr, false);
+     path_print_policy policy (text_output);
+     path_summary summary (policy, *event_pp, path, false);
+     ASSERT_EQ (summary.get_num_ranges (), 9);
+diff --git a/gcc/diagnostic-show-locus.cc b/gcc/diagnostic-show-locus.cc
+index 712b5153e673..dbd4ceaee098 100644
+--- a/gcc/diagnostic-show-locus.cc
++++ b/gcc/diagnostic-show-locus.cc
+@@ -3253,7 +3253,8 @@ add_location_if_nearby (const diagnostic_context &dc,
+ 			bool restrict_to_current_line_spans,
+ 			const range_label *label)
+ {
+-  diagnostic_source_print_policy source_policy (dc);
++  diagnostic_source_print_policy source_policy (dc,
++						dc.m_source_printing);
+   return add_location_if_nearby (source_policy, loc,
+ 				 restrict_to_current_line_spans, label);
+ }
+@@ -3264,13 +3265,14 @@ add_location_if_nearby (const diagnostic_context &dc,
+ 
+ void
+ diagnostic_context::maybe_show_locus (const rich_location &richloc,
++				      const diagnostic_source_printing_options &opts,
+ 				      diagnostic_t diagnostic_kind,
+ 				      pretty_printer &pp,
+ 				      diagnostic_source_effect_info *effects)
+ {
+   const location_t loc = richloc.get_loc ();
+   /* Do nothing if source-printing has been disabled.  */
+-  if (!m_source_printing.enabled)
++  if (!opts.enabled)
+     return;
+ 
+   /* Don't attempt to print source for UNKNOWN_LOCATION and for builtins.  */
+@@ -3287,7 +3289,7 @@ diagnostic_context::maybe_show_locus (const rich_location &richloc,
+ 
+   m_last_location = loc;
+ 
+-  diagnostic_source_print_policy source_policy (*this);
++  diagnostic_source_print_policy source_policy (*this, opts);
+   source_policy.print (pp, richloc, diagnostic_kind, effects);
+ }
+ 
+@@ -3302,6 +3304,18 @@ diagnostic_source_print_policy (const diagnostic_context &dc)
+ {
+ }
+ 
++diagnostic_source_print_policy::
++diagnostic_source_print_policy (const diagnostic_context &dc,
++				const diagnostic_source_printing_options &opts)
++: m_options (opts),
++  m_location_policy (dc),
++  m_start_span_cb (dc.m_text_callbacks.m_start_span),
++  m_file_cache (dc.get_file_cache ()),
++  m_diagram_theme (dc.get_diagram_theme ()),
++  m_escape_format (dc.get_escape_format ())
++{
++}
++
+ /* Print to PP the physical source code corresponding to the location(s)
+    in RICHLOC, with additional annotations, as if for a diagnostic of the
+    given DIAGNOSTIC_KIND.
+diff --git a/gcc/diagnostic.cc b/gcc/diagnostic.cc
+index 610914b267f9..9079a6fdf5b4 100644
+--- a/gcc/diagnostic.cc
++++ b/gcc/diagnostic.cc
+@@ -283,7 +283,8 @@ diagnostic_context::initialize (int n_opts)
+   m_diagnostic_groups.m_group_nesting_depth = 0;
+   m_diagnostic_groups.m_diagnostic_nesting_level = 0;
+   m_diagnostic_groups.m_emission_count = 0;
+-  m_output_sinks.safe_push (new diagnostic_text_output_format (*this, true));
++  m_output_sinks.safe_push
++    (new diagnostic_text_output_format (*this, nullptr, true));
+   m_set_locations_cb = nullptr;
+   m_client_data_hooks = nullptr;
+   m_diagrams.m_theme = nullptr;
+@@ -439,11 +440,17 @@ diagnostic_context::dump (FILE *out) const
+   m_diagnostic_counters.dump (out, 2);
+   fprintf (out, "  reference printer:\n");
+   m_reference_printer->dump (out, 4);
+-  for (unsigned i = 0; i < m_output_sinks.length (); ++i)
++  fprintf (out, "  output sinks:\n");
++  if (m_output_sinks.length () > 0)
+     {
+-      fprintf (out, "  sink %i:\n", i);
+-      m_output_sinks[i]->dump (out, 4);
++      for (unsigned i = 0; i < m_output_sinks.length (); ++i)
++	{
++	  fprintf (out, "  sink %i:\n", i);
++	  m_output_sinks[i]->dump (out, 4);
++	}
+     }
++  else
++    fprintf (out, "    (none):\n");
+   fprintf (out, "  diagnostic buffer:\n");
+   if (m_diagnostic_buffer)
+     m_diagnostic_buffer->dump (out, 4);
+@@ -470,11 +477,17 @@ diagnostic_context::execution_failed_p () const
+ }
+ 
+ void
+-diagnostic_context::
+-set_output_format (std::unique_ptr<diagnostic_output_format> output_format)
++diagnostic_context::remove_all_output_sinks ()
+ {
+   while (!m_output_sinks.is_empty ())
+     delete m_output_sinks.pop ();
++}
++
++void
++diagnostic_context::
++set_output_format (std::unique_ptr<diagnostic_output_format> output_format)
++{
++  remove_all_output_sinks ();
+   m_output_sinks.safe_push (output_format.release ());
+ }
+ 
+diff --git a/gcc/diagnostic.h b/gcc/diagnostic.h
+index 8d14d8e604e9..0de59508caaa 100644
+--- a/gcc/diagnostic.h
++++ b/gcc/diagnostic.h
+@@ -402,6 +402,8 @@ class diagnostic_source_print_policy
+ {
+ public:
+   diagnostic_source_print_policy (const diagnostic_context &);
++  diagnostic_source_print_policy (const diagnostic_context &,
++				  const diagnostic_source_printing_options &);
+ 
+   void
+   print (pretty_printer &pp,
+@@ -596,6 +598,7 @@ public:
+   }
+ 
+   void maybe_show_locus (const rich_location &richloc,
++			 const diagnostic_source_printing_options &opts,
+ 			 diagnostic_t diagnostic_kind,
+ 			 pretty_printer &pp,
+ 			 diagnostic_source_effect_info *effect_info);
+@@ -761,6 +764,8 @@ public:
+   void
+   add_sink (std::unique_ptr<diagnostic_output_format>);
+ 
++  void remove_all_output_sinks ();
++
+   bool supports_fnotice_on_stderr_p () const;
+ 
+ private:
+@@ -1093,6 +1098,7 @@ diagnostic_finish (diagnostic_context *context)
+ 
+ inline void
+ diagnostic_show_locus (diagnostic_context *context,
++		       const diagnostic_source_printing_options &opts,
+ 		       rich_location *richloc,
+ 		       diagnostic_t diagnostic_kind,
+ 		       pretty_printer *pp,
+@@ -1101,7 +1107,7 @@ diagnostic_show_locus (diagnostic_context *context,
+   gcc_assert (context);
+   gcc_assert (richloc);
+   gcc_assert (pp);
+-  context->maybe_show_locus (*richloc, diagnostic_kind, *pp, effect_info);
++  context->maybe_show_locus (*richloc, opts, diagnostic_kind, *pp, effect_info);
+ }
+ 
+ /* Because we read source files a second time after the frontend did it the
+diff --git a/gcc/fortran/error.cc b/gcc/fortran/error.cc
+index 36961e591da8..2db192c6a208 100644
+--- a/gcc/fortran/error.cc
++++ b/gcc/fortran/error.cc
+@@ -606,7 +606,9 @@ gfc_diagnostic_text_starter (diagnostic_text_output_format &text_output,
+       pp_newline (pp);
+       pp_set_prefix (pp, NULL);
+       pp_newline (pp);
+-      diagnostic_show_locus (context, diagnostic->richloc, diagnostic->kind,
++      diagnostic_show_locus (context,
++			     text_output.get_source_printing_options (),
++			     diagnostic->richloc, diagnostic->kind,
+ 			     pp);
+       /* If the caret line was shown, the prefix does not contain the
+ 	 locus.  */
+diff --git a/gcc/libgdiagnostics.cc b/gcc/libgdiagnostics.cc
+index 53a8423f9045..448f19b1f1b5 100644
+--- a/gcc/libgdiagnostics.cc
++++ b/gcc/libgdiagnostics.cc
+@@ -190,28 +190,10 @@ as_diagnostic_event_id (diagnostic_event_id_t id)
+ 
+ class sink
+ {
+-public:
+-  virtual ~sink ();
+-
+-  void begin_group ()
+-  {
+-    m_dc.begin_group ();
+-  }
+-  void end_group ()
+-  {
+-    m_dc.end_group ();
+-  }
+-
+-  void emit (diagnostic &diag, const char *msgid, va_list *args)
+-    LIBGDIAGNOSTICS_PARAM_GCC_FORMAT_STRING (3, 0);
+-
+ protected:
+-  sink (diagnostic_manager &mgr);
++  sink (diagnostic_manager &mgr) : m_mgr (mgr) {}
+ 
+   diagnostic_manager &m_mgr;
+-
+-  /* One context per sink.  */
+-  diagnostic_context m_dc;
+ };
+ 
+ /* This has to be a "struct" as it is exposed in the C API.  */
+@@ -223,20 +205,21 @@ public:
+ 			FILE *dst_stream,
+ 			enum diagnostic_colorize colorize);
+ 
+-  void
+-  on_begin_text_diagnostic (diagnostic_text_output_format &text_format,
+-			    const diagnostic_info *info);
+-
+   diagnostic_source_printing_options &get_source_printing_options ()
+   {
+-    return m_dc.m_source_printing;
++    return m_source_printing;
+   }
+ 
+   void
+   set_colorize (enum diagnostic_colorize colorize);
+ 
++  static void
++  text_starter (diagnostic_text_output_format &text_output,
++		const diagnostic_info *diagnostic);
++
+ private:
+-  const diagnostic_logical_location *m_current_logical_loc;
++  diagnostic_text_output_format *m_inner_sink; // borrowed from dc
++  diagnostic_source_printing_options m_source_printing;
+ };
+ 
+ class sarif_sink : public sink
+@@ -314,17 +297,48 @@ struct diagnostic_manager
+ {
+ public:
+   diagnostic_manager ()
+-    : m_current_diag (nullptr),
+-      m_edit_context (m_file_cache)
++  : m_current_diag (nullptr),
++    m_prev_diag_logical_loc (nullptr)
+   {
+     linemap_init (&m_line_table, BUILTINS_LOCATION);
+     m_line_table.m_reallocator = xrealloc;
+     m_line_table.m_round_alloc_size = round_alloc_size;
+     m_line_table.default_range_bits = line_map_suggested_range_bits;
++
++    diagnostic_initialize (&m_dc, 0);
++    m_dc.remove_all_output_sinks ();
++
++    /* Get defaults from environemt.  These might be
++       overridden by individual sinks.  */
++    diagnostic_color_init (&m_dc, DIAGNOSTICS_COLOR_AUTO);
++    diagnostic_urls_init (&m_dc);
++
++    m_dc.set_show_cwe (true);
++    m_dc.set_show_rules (true);
++    m_dc.m_show_column = true;
++    m_dc.m_source_printing.enabled = true;
++    m_dc.m_source_printing.colorize_source_p = true;
++
++    /* We don't currently expose a way for clients to manipulate the
++       following.  */
++    m_dc.m_source_printing.show_labels_p = true;
++    m_dc.m_source_printing.show_line_numbers_p = true;
++    m_dc.m_source_printing.min_margin_width = 6;
++    m_dc.set_path_format (DPF_INLINE_EVENTS);
++
++    m_dc.m_client_aux_data = this;
++    m_dc.set_client_data_hooks
++      (::make_unique<impl_diagnostic_client_data_hooks> (*this));
++
++    diagnostic_text_starter (&m_dc) = diagnostic_text_sink::text_starter;
++
++    m_edit_context = ::make_unique <edit_context> (m_dc.get_file_cache ());
+   }
++
+   ~diagnostic_manager ()
+   {
+-    /* Clean up sinks first, as they can use other fields. */
++    diagnostic_finish (&m_dc);
++
+     for (size_t i = 0; i < m_sinks.size (); i++)
+       m_sinks[i] = nullptr;
+ 
+@@ -339,7 +353,7 @@ public:
+   }
+ 
+   line_maps *get_line_table () { return &m_line_table; }
+-  file_cache *get_file_cache () { return &m_file_cache; }
++  diagnostic_context &get_dc () { return m_dc; }
+ 
+   void write_patch (FILE *dst_stream);
+ 
+@@ -415,14 +429,12 @@ public:
+ 
+   void begin_group ()
+   {
+-    for (auto &sink : m_sinks)
+-      sink->begin_group ();
++    m_dc.begin_group ();
+   }
+ 
+   void end_group ()
+   {
+-    for (auto &sink : m_sinks)
+-      sink->end_group ();
++    m_dc.end_group ();
+   }
+ 
+   const char *
+@@ -463,6 +475,12 @@ public:
+     line_table = const_cast<line_maps *> (&m_line_table);
+   }
+ 
++  const diagnostic_logical_location *
++  get_prev_diag_logical_loc () const
++  {
++    return m_prev_diag_logical_loc;
++  }
++
+ private:
+   void
+   ensure_linemap_for_file_and_line (const diagnostic_file *file,
+@@ -495,8 +513,8 @@ private:
+     return phys_loc;
+   }
+ 
++  diagnostic_context m_dc;
+   line_maps m_line_table;
+-  file_cache m_file_cache;
+   impl_client_version_info m_client_version_info;
+   std::vector<std::unique_ptr<sink>> m_sinks;
+   hash_map<nofree_string_hash, diagnostic_file *> m_str_to_file_map;
+@@ -504,7 +522,8 @@ private:
+ 	   diagnostic_physical_location *> m_location_t_map;
+   std::vector<std::unique_ptr<diagnostic_logical_location>> m_logical_locs;
+   const diagnostic *m_current_diag;
+-  edit_context m_edit_context;
++  const diagnostic_logical_location *m_prev_diag_logical_loc;
++  std::unique_ptr<edit_context> m_edit_context;
+ };
+ 
+ class impl_rich_location : public rich_location
+@@ -862,134 +881,75 @@ add_sarif_invocation_properties (sarif_object &) const
+   // No-op.
+ }
+ 
+-/* class sink.  */
+-
+-void
+-sink::emit (diagnostic &diag, const char *msgid, va_list *args)
+-{
+-  diagnostic_info info;
+-GCC_DIAGNOSTIC_PUSH_IGNORED(-Wsuggest-attribute=format)
+-  diagnostic_set_info (&info, msgid, args, diag.get_rich_location (),
+-		       diagnostic_t_from_diagnostic_level (diag.get_level ()));
+-GCC_DIAGNOSTIC_POP
+-  info.metadata = diag.get_metadata ();
+-  diagnostic_report_diagnostic (&m_dc, &info);
+-}
+-
+-sink::sink (diagnostic_manager &mgr)
+-: m_mgr (mgr)
+-{
+-  diagnostic_initialize (&m_dc, 0);
+-  m_dc.m_client_aux_data = this;
+-  m_dc.set_client_data_hooks
+-    (::make_unique<impl_diagnostic_client_data_hooks> (mgr));
+-}
++/* struct diagnostic_text_sink : public sink.  */
+ 
+-sink::~sink ()
+-{
+-  diagnostic_finish (&m_dc);
++diagnostic_text_sink::diagnostic_text_sink (diagnostic_manager &mgr,
++					    FILE *dst_stream,
++					    enum diagnostic_colorize colorize)
++: sink (mgr),
++  m_source_printing (mgr.get_dc ().m_source_printing)
++{
++  auto inner_sink
++    = ::make_unique<diagnostic_text_output_format> (mgr.get_dc (),
++						    &m_source_printing);
++  inner_sink->get_printer ()->set_output_stream (dst_stream);
++  m_inner_sink = inner_sink.get ();
++  set_colorize (colorize);
++  mgr.get_dc ().add_sink (std::move (inner_sink));
+ }
+ 
+-/* struct diagnostic_text_sink : public sink.  */
+-
+-static diagnostic_color_rule_t
+-get_color_rule (enum diagnostic_colorize colorize)
++void
++diagnostic_text_sink::set_colorize (enum diagnostic_colorize colorize)
+ {
++  pretty_printer *const pp = m_inner_sink->get_printer ();
+   switch (colorize)
+     {
+     default:
+       gcc_unreachable ();
+     case DIAGNOSTIC_COLORIZE_IF_TTY:
+-      return DIAGNOSTICS_COLOR_AUTO;
++      pp_show_color (pp)
++	= pp_show_color (m_mgr.get_dc ().get_reference_printer ());
+       break;
+     case DIAGNOSTIC_COLORIZE_NO:
+-      return DIAGNOSTICS_COLOR_NO;
++      pp_show_color (pp) = false;
+       break;
+     case DIAGNOSTIC_COLORIZE_YES:
+-      return DIAGNOSTICS_COLOR_YES;
++      pp_show_color (pp) = true;
+       break;
+     }
+ }
+ 
+-diagnostic_text_sink::diagnostic_text_sink (diagnostic_manager &mgr,
+-					    FILE *dst_stream,
+-					    enum diagnostic_colorize colorize)
+-: sink (mgr),
+-  m_current_logical_loc (nullptr)
+-{
+-  m_dc.set_show_cwe (true);
+-  m_dc.set_show_rules (true);
+-
+-  diagnostic_color_init (&m_dc, get_color_rule (colorize));
+-  diagnostic_urls_init (&m_dc);
+-
+-  auto text_format = ::make_unique<diagnostic_text_output_format> (m_dc, true);
+-  text_format->get_printer ()->set_output_stream (dst_stream);
+-  m_dc.set_output_format (std::move (text_format));
+-  diagnostic_text_starter (&m_dc)
+-    = [] (diagnostic_text_output_format &text_format,
+-	  const diagnostic_info *info)
+-      {
+-	diagnostic_context &dc = text_format.get_context ();
+-	diagnostic_text_sink *sink
+-	  = static_cast<diagnostic_text_sink *> (dc.m_client_aux_data);
+-	sink->on_begin_text_diagnostic (text_format, info);
+-      };
+-  m_dc.set_show_cwe (true);
+-  m_dc.set_show_rules (true);
+-  m_dc.m_show_column = true;
+-  m_dc.m_source_printing.enabled = true;
+-  m_dc.m_source_printing.colorize_source_p = true;
+-
+-  /* We don't currently expose a way for clients to manipulate the
+-     following.  */
+-  m_dc.m_source_printing.show_labels_p = true;
+-  m_dc.m_source_printing.show_line_numbers_p = true;
+-  m_dc.m_source_printing.min_margin_width = 6;
+-  m_dc.set_path_format (DPF_INLINE_EVENTS);
+-}
+-
+-void
+-diagnostic_text_sink::set_colorize (enum diagnostic_colorize colorize)
+-{
+-  diagnostic_color_init (&m_dc, get_color_rule (colorize));
+-}
+-
+ void
+-diagnostic_text_sink::
+-on_begin_text_diagnostic (diagnostic_text_output_format &text_format,
+-			  const diagnostic_info *info)
++diagnostic_text_sink::text_starter (diagnostic_text_output_format &text_output,
++				    const diagnostic_info *info)
+ {
+-  const diagnostic *diag = m_mgr.get_current_diag ();
+-  gcc_assert (diag);
+-  pretty_printer *pp = text_format.get_printer ();
++  gcc_assert (info->x_data);
++  const diagnostic &diag = *static_cast<const diagnostic *> (info->x_data);
++  pretty_printer *pp = text_output.get_printer ();
+   const diagnostic_logical_location *diag_logical_loc
+-    = diag->get_logical_location ();
+-  if (m_current_logical_loc != diag_logical_loc)
++    = diag.get_logical_location ();
++  diagnostic_manager &mgr = diag.get_manager ();
++  if (diag_logical_loc && diag_logical_loc != mgr.get_prev_diag_logical_loc ())
+     {
+-      m_current_logical_loc = diag_logical_loc;
+-      if (m_current_logical_loc)
++      pp_set_prefix (pp, nullptr);
++      switch (diag_logical_loc->get_kind ())
+ 	{
+-	  pp_set_prefix (pp, nullptr);
+-	  switch (m_current_logical_loc->get_kind ())
++	default:
++	  break;
++	case LOGICAL_LOCATION_KIND_FUNCTION:
++	  if (const char *name
++	      = diag_logical_loc->get_name_with_scope ())
+ 	    {
+-	    default:
+-	      break;
+-	    case LOGICAL_LOCATION_KIND_FUNCTION:
+-	      if (const char *name
+-		  = m_current_logical_loc->get_name_with_scope ())
+-		{
+-		  pp_printf (pp, _("In function %qs"), name);
+-		  pp_character (pp, ':');
+-		  pp_newline (pp);
+-		}
+-	      break;
+-	      // TODO: handle other cases
++	      pp_printf (pp, _("In function %qs"), name);
++	      pp_character (pp, ':');
++	      pp_newline (pp);
+ 	    }
++	  break;
++	  // TODO: handle other cases
+ 	}
+     }
+   pp_set_prefix (pp,
+-		 text_format.build_prefix (*info));
++		 text_output.build_prefix (*info));
+ }
+ 
+ /* class sarif_sink : public sink.  */
+@@ -1000,13 +960,14 @@ sarif_sink::sarif_sink (diagnostic_manager &mgr,
+ 			enum sarif_version version)
+ : sink (mgr)
+ {
+-  const char *main_input_filename = main_input_file->get_name ();
+-  diagnostic_output_format_init_sarif_stream (m_dc,
+-					      mgr.get_line_table (),
+-					      main_input_filename,
+-					      true,
+-					      version,
+-					      dst_stream);
++  diagnostic_output_file output_file (dst_stream, false,
++				      label_text::borrow ("sarif_sink"));
++  auto inner_sink = make_sarif_sink (mgr.get_dc (),
++				     *mgr.get_line_table (),
++				     main_input_file->get_name (),
++				     version,
++				     std::move (output_file));
++  mgr.get_dc ().add_sink (std::move (inner_sink));
+ }
+ 
+ /* struct diagnostic_manager.  */
+@@ -1016,7 +977,7 @@ diagnostic_manager::write_patch (FILE *dst_stream)
+ {
+   pretty_printer pp;
+   pp.set_output_stream (dst_stream);
+-  m_edit_context.print_diff (&pp, true);
++  m_edit_context->print_diff (&pp, true);
+   pp_flush (&pp);
+ }
+ 
+@@ -1026,17 +987,27 @@ diagnostic_manager::emit (diagnostic &diag, const char *msgid, va_list *args)
+   set_line_table_global ();
+ 
+   m_current_diag = &diag;
+-  for (auto &sink : m_sinks)
+-    {
+-      va_list arg_copy;
+-      va_copy (arg_copy, *args);
+-      sink->emit (diag, msgid, &arg_copy);
+-    }
++
++  {
++    m_dc.begin_group ();
++
++    diagnostic_info info;
++GCC_DIAGNOSTIC_PUSH_IGNORED(-Wsuggest-attribute=format)
++    diagnostic_set_info (&info, msgid, args, diag.get_rich_location (),
++			 diagnostic_t_from_diagnostic_level (diag.get_level ()));
++GCC_DIAGNOSTIC_POP
++    info.metadata = diag.get_metadata ();
++    info.x_data = &diag;
++    diagnostic_report_diagnostic (&m_dc, &info);
++
++    m_dc.end_group ();
++  }
+ 
+   rich_location *rich_loc = diag.get_rich_location ();
+   if (rich_loc->fixits_can_be_auto_applied_p ())
+-    m_edit_context.add_fixits (rich_loc);
++    m_edit_context->add_fixits (rich_loc);
+ 
++  m_prev_diag_logical_loc = diag.get_logical_location ();
+   m_current_diag = nullptr;
+ }
+ 
+diff --git a/gcc/testsuite/gcc.dg/plugin/diagnostic_plugin_test_show_locus.cc b/gcc/testsuite/gcc.dg/plugin/diagnostic_plugin_test_show_locus.cc
+index 95d5b1a04480..cd3834b21000 100644
+--- a/gcc/testsuite/gcc.dg/plugin/diagnostic_plugin_test_show_locus.cc
++++ b/gcc/testsuite/gcc.dg/plugin/diagnostic_plugin_test_show_locus.cc
+@@ -142,6 +142,7 @@ custom_diagnostic_text_finalizer (diagnostic_text_output_format &text_output,
+   pp_set_prefix (pp, NULL);
+   pp_newline (pp);
+   diagnostic_show_locus (&text_output.get_context (),
++			 text_output.get_source_printing_options (),
+ 			 diagnostic->richloc, diagnostic->kind, pp);
+   pp_show_color (pp) = old_show_color;
+   pp_set_prefix (pp, saved_prefix);
+diff --git a/gcc/testsuite/gcc.dg/plugin/diagnostic_plugin_xhtml_format.cc b/gcc/testsuite/gcc.dg/plugin/diagnostic_plugin_xhtml_format.cc
+index aa03b7d5d2cc..2ce267c32078 100644
+--- a/gcc/testsuite/gcc.dg/plugin/diagnostic_plugin_xhtml_format.cc
++++ b/gcc/testsuite/gcc.dg/plugin/diagnostic_plugin_xhtml_format.cc
+@@ -630,7 +630,8 @@ xhtml_builder::make_element_for_diagnostic (const diagnostic_info &diagnostic,
+     auto pre = ::make_unique<xml::element> ("pre", true);
+     pre->set_attr ("class", label_text::borrow ("gcc-annotated-source"));
+     // TODO: ideally we'd like to capture elements within the following:
+-    diagnostic_show_locus (&m_context, diagnostic.richloc, diagnostic.kind,
++    diagnostic_show_locus (&m_context, m_context.m_source_printing,
++			   diagnostic.richloc, diagnostic.kind,
+ 			   m_printer);
+     pre->add_text
+       (label_text::take (xstrdup (pp_formatted_text (m_printer))));
+diff --git a/gcc/testsuite/gcc.dg/plugin/expensive_selftests_plugin.cc b/gcc/testsuite/gcc.dg/plugin/expensive_selftests_plugin.cc
+index 217e8f8c9cb8..7b9b8d4c031c 100644
+--- a/gcc/testsuite/gcc.dg/plugin/expensive_selftests_plugin.cc
++++ b/gcc/testsuite/gcc.dg/plugin/expensive_selftests_plugin.cc
+@@ -48,7 +48,8 @@ test_richloc (rich_location *richloc)
+ {
+   /* Run the diagnostic and fix-it printing code.  */
+   test_diagnostic_context dc;
+-  diagnostic_show_locus (&dc, richloc, DK_ERROR, dc.get_reference_printer ());
++  diagnostic_show_locus (&dc, dc.m_source_printing,
++			 richloc, DK_ERROR, dc.get_reference_printer ());
+ 
+   /* Generate a diff.  */
+   edit_context ec (global_dc->get_file_cache ());
+-- 
+2.26.3
+

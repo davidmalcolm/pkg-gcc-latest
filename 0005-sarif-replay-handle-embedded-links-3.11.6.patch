@@ -1,0 +1,223 @@
+From 6302ffc995fe3ba344f2e192ecc1ca53494e48fe Mon Sep 17 00:00:00 2001
+From: David Malcolm <dmalcolm@redhat.com>
+Date: Fri, 13 Dec 2024 12:23:08 -0500
+Subject: [pushed: r15-6286] =?UTF-8?q?sarif-replay:=20handle=20embedded=20links?=
+ =?UTF-8?q?=20(=C2=A73.11.6)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Handle embedded links in plain text messages.  For now, merely
+use the link text and discard the destination.
+
+Successfully bootstrapped & regrtested on x86_64-pc-linux-gnu.
+Pushed to trunk as r15-6286-g7f4f49687b1f1b.
+
+gcc/ChangeLog:
+	* libsarifreplay.cc (struct embedded_link): New.
+	(maybe_consume_embedded_link): New.
+	(sarif_replayer::make_plain_text_within_result_message): Handle
+	embedded links by using the link text, for now.
+
+gcc/testsuite/ChangeLog:
+	* sarif-replay.dg/2.1.0-valid/3.11.6-embedded-links.sarif: New test.
+	* sarif-replay.dg/2.1.0-valid/malloc-vs-local-4.c.sarif: Update
+	expected output for handling the embedded links.
+	* sarif-replay.dg/2.1.0-valid/spec-example-4.sarif: Likewise.
+
+Signed-off-by: David Malcolm <dmalcolm@redhat.com>
+---
+ gcc/libsarifreplay.cc                         | 91 ++++++++++++++++++-
+ .../2.1.0-valid/3.11.6-embedded-links.sarif   | 25 +++++
+ .../2.1.0-valid/malloc-vs-local-4.c.sarif     |  5 +-
+ .../2.1.0-valid/spec-example-4.sarif          |  2 +-
+ 4 files changed, 117 insertions(+), 6 deletions(-)
+ create mode 100644 gcc/testsuite/sarif-replay.dg/2.1.0-valid/3.11.6-embedded-links.sarif
+
+diff --git a/gcc/libsarifreplay.cc b/gcc/libsarifreplay.cc
+index f1374ec4fc80..074ea90f352b 100644
+--- a/gcc/libsarifreplay.cc
++++ b/gcc/libsarifreplay.cc
+@@ -1176,11 +1176,91 @@ maybe_consume_placeholder (const char *&iter_src, unsigned *out_arg_idx)
+   return false;
+ }
+ 
++struct embedded_link
++{
++  std::string text;
++  std::string destination;
++};
++
++/*  If ITER_SRC starts with an embedded link as per §3.11.6, advance ITER_SRC
++    to immediately beyond the link, and return the link.
++
++    Otherwise, leave ITER_SRC untouched and return nullptr.  */
++
++static std::unique_ptr<embedded_link>
++maybe_consume_embedded_link (const char *&iter_src)
++{
++  if (*iter_src != '[')
++    return nullptr;
++
++  /* This *might* be an embedded link.
++     See §3.11.6 ("Messages with embedded links") and
++     https://github.com/oasis-tcs/sarif-spec/issues/657 */
++
++  /* embedded link = "[", link text, "](", link destination, ")"; */
++
++  embedded_link result;
++
++  /* Try to get the link text.  */
++  const char *iter = iter_src + 1;
++  while (char ch = *(iter++))
++    {
++      if (ch == '\\')
++	{
++	  char next_ch = *iter;
++	  switch (next_ch)
++	    {
++	    case '\\':
++	    case '[':
++	    case ']':
++	      /* escaped link character = "\" | "[" | "]";  */
++	      result.text += next_ch;
++	      iter++;
++	      continue;
++
++	    default:
++	      /* Malformed link text; assume this is not an
++		 embedded link.  */
++	      return nullptr;
++	    }
++	}
++      else if (ch == ']')
++	/* End of link text.  */
++	break;
++      else
++	result.text += ch;
++    }
++
++  if (*iter++ != '(')
++    return nullptr;
++
++  /* Try to get the link destination.  */
++  while (1)
++    {
++      char ch = *(iter++);
++      if (ch == '\0')
++	{
++	  /* String ended before terminating ')'.
++	     Assume this is not an embedded link.  */
++	  return nullptr;
++	}
++      else if (ch == ')')
++	/* Terminator.  */
++	break;
++      else
++	result.destination += ch;
++    }
++
++  iter_src = iter;
++  return ::make_unique<embedded_link> (std::move (result));
++}
++
+ /* Lookup the plain text string within a result.message (§3.27.11),
+-   and substitute for any placeholders (§3.11.5).
++   and substitute for any placeholders (§3.11.5) and handle any
++   embedded links (§3.11.6).
+ 
+    Limitations:
+-   - we don't yet support embedded links
++   - we don't preserve destinations within embedded links
+ 
+    MESSAGE_OBJ is "theMessage"
+    RULE_OBJ is "theRule".  */
+@@ -1255,6 +1335,13 @@ make_plain_text_within_result_message (const json::object *tool_component_obj,
+ 	      return label_text::borrow (nullptr);
+ 	    }
+ 	}
++      else if (auto link = maybe_consume_embedded_link (iter_src))
++	{
++	  accum += link->text;
++	  /* TODO: use the destination.  */
++	  /* TODO: potentially could try to convert
++	     intra-sarif links into event ids.  */
++	}
+       else
+ 	{
+ 	  accum += ch;
+diff --git a/gcc/testsuite/sarif-replay.dg/2.1.0-valid/3.11.6-embedded-links.sarif b/gcc/testsuite/sarif-replay.dg/2.1.0-valid/3.11.6-embedded-links.sarif
+new file mode 100644
+index 000000000000..bc64521716c6
+--- /dev/null
++++ b/gcc/testsuite/sarif-replay.dg/2.1.0-valid/3.11.6-embedded-links.sarif
+@@ -0,0 +1,25 @@
++{"$schema": "https://docs.oasis-open.org/sarif/sarif/v2.1.0/errata01/os/schemas/sarif-schema-2.1.0.json",
++ "version": "2.1.0",
++ "runs": [{"tool": {"driver": {"name": "hand-written"}},
++           "results": [{"message": {"text": "001: this is a test"},
++	   	        "locations": []},
++/* { dg-begin-multiline-output "" }
++hand-written: warning: 001: this is a test
++   { dg-end-multiline-output "" } */
++
++                       /* Without the fix from https://github.com/oasis-tcs/sarif-spec/issues/656 */
++                       {"message": {"text": "002: Prohibited term used in [para\\[0\\]\\\\spans\\[2\\](1)."},
++	   	        "locations": []},
++/* { dg-begin-multiline-output "" }
++hand-written: warning: 002: Prohibited term used in [para\[0\]\\spans\[2\](1).
++   { dg-end-multiline-output "" } */
++                       
++                       /* With the fix from https://github.com/oasis-tcs/sarif-spec/issues/656 */
++                       {"message": {"text": "003: Prohibited term used in [para\\[0\\]\\\\spans\\[2\\]](1)."},
++	   	        "locations": []}
++/* { dg-begin-multiline-output "" }
++hand-written: warning: 003: Prohibited term used in para[0]\spans[2].
++   { dg-end-multiline-output "" } */
++
++]}]}
++
+diff --git a/gcc/testsuite/sarif-replay.dg/2.1.0-valid/malloc-vs-local-4.c.sarif b/gcc/testsuite/sarif-replay.dg/2.1.0-valid/malloc-vs-local-4.c.sarif
+index 5fd8e628b47d..55c646bb5ad2 100644
+--- a/gcc/testsuite/sarif-replay.dg/2.1.0-valid/malloc-vs-local-4.c.sarif
++++ b/gcc/testsuite/sarif-replay.dg/2.1.0-valid/malloc-vs-local-4.c.sarif
+@@ -334,7 +334,6 @@
+                                                                        "nestingLevel": 1,
+                                                                        "executionOrder": 5}]}]}]}]}]}
+ // TODO: show the CWEs
+-// TODO: fix URL in message
+ 
+ /* { dg-begin-multiline-output "" }
+ In function 'callee_1':
+@@ -372,7 +371,7 @@ In function 'callee_1':
+            |    5 |   *ptr = 42;
+            |      |   ~~~~~~~~~~                    
+            |      |   |
+-           |      |   (7) ‘ptr’ could be NULL: unchecked value from [(4)](sarif:/runs/0/results/0/codeFlows/0/threadFlows/0/locations/3)
++           |      |   (7) ‘ptr’ could be NULL: unchecked value from (4)
+            |
+    { dg-end-multiline-output "" } */
+ /* { dg-begin-multiline-output "" }
+@@ -398,5 +397,5 @@ In function 'test_2':
+    38 |       free (ptr);
+       |       ~~~~~~~~~~~
+       |       |
+-      |       (5) second ‘free’ here; first ‘free’ was at [(4)](sarif:/runs/0/results/1/codeFlows/0/threadFlows/0/locations/3)
++      |       (5) second ‘free’ here; first ‘free’ was at (4)
+    { dg-end-multiline-output "" } */
+diff --git a/gcc/testsuite/sarif-replay.dg/2.1.0-valid/spec-example-4.sarif b/gcc/testsuite/sarif-replay.dg/2.1.0-valid/spec-example-4.sarif
+index 60c87314e1c8..27a0767bd0ef 100644
+--- a/gcc/testsuite/sarif-replay.dg/2.1.0-valid/spec-example-4.sarif
++++ b/gcc/testsuite/sarif-replay.dg/2.1.0-valid/spec-example-4.sarif
+@@ -748,7 +748,7 @@
+ 
+ /* { dg-begin-multiline-output "" }
+ In function 'collections::list::add':
+-collections/list.h:15:9: error: Variable "ptr" was used without being initialized. It was declared [here](0). [C2001]
++collections/list.h:15:9: error: Variable "ptr" was used without being initialized. It was declared here. [C2001]
+   events 1-3
+ ......
+    { dg-end-multiline-output "" } */
+-- 
+2.26.3
+

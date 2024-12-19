@@ -1,0 +1,789 @@
+From 31dd9b80f0b10826cc728927e6d5fc57658d7228 Mon Sep 17 00:00:00 2001
+From: David Malcolm <dmalcolm@redhat.com>
+Date: Thu, 12 Dec 2024 17:24:38 -0500
+Subject: [pushed: r15-6285] libgdiagnostics: consolidate logical locations
+
+This patch updates diagnostic_manager_new_logical_location so
+that repeated calls with the same input values yield the same
+instance of diagnostic_logical_location.
+
+Doing so allows the path-printing logic to properly consolidate runs of
+events, whereas previously it could treat each event as having a
+distinct logical location, and thus require them to be printed
+separately; this greatly improves the output of sarif-replay when
+displaying execution paths.
+
+Successfully bootstrapped & regrtested on x86_64-pc-linux-gnu.
+Pushed to trunk as r15-6285-g2af541920787e3.
+
+gcc/ChangeLog:
+	* doc/libgdiagnostics/topics/logical-locations.rst
+	(diagnostic_manager_new_logical_location): Add note about repeated
+	calls.
+	* libgdiagnostics.cc: Define INCLUDE_MAP.
+	(class owned_nullable_string): Add copy ctor and move ctor.
+	(owned_nullable_string::operator<): New.
+	(diagnostic_logical_location::operator<): New.
+	(diagnostic_manager::new_logical_location): Use m_logical_locs to
+	"uniquify" instances, converting it to a std::map.
+	(diagnostic_manager::logical_locs_map_t): New typedef.
+	(diagnostic_manager::t m_logical_locs): Convert from a std::vector
+	to a std::map.
+	(diagnostic_execution_path::same_function_p): Update comment.
+
+gcc/testsuite/ChangeLog:
+	* libgdiagnostics.dg/test-logical-location.c: Include <assert.h>.
+	Verify that creating a diagnostic_logical_location with equal
+	values yields the same instance.
+	* sarif-replay.dg/2.1.0-valid/malloc-vs-local-4.c.sarif: New test.
+	* sarif-replay.dg/2.1.0-valid/signal-1.c.moved.sarif: Update
+	expected output to show logical location and for consolidation of
+	events into runs.
+	* sarif-replay.dg/2.1.0-valid/signal-1.c.sarif: Likewise.
+	* sarif-replay.dg/2.1.0-valid/spec-example-4.sarif: Likewise.
+
+Signed-off-by: David Malcolm <dmalcolm@redhat.com>
+---
+ .../topics/logical-locations.rst              |   6 +
+ gcc/libgdiagnostics.cc                        |  58 ++-
+ .../test-logical-location.c                   |  13 +
+ .../2.1.0-valid/malloc-vs-local-4.c.sarif     | 402 ++++++++++++++++++
+ .../2.1.0-valid/signal-1.c.moved.sarif        |  25 +-
+ .../2.1.0-valid/signal-1.c.sarif              |  25 +-
+ .../2.1.0-valid/spec-example-4.sarif          |  11 +-
+ 7 files changed, 497 insertions(+), 43 deletions(-)
+ create mode 100644 gcc/testsuite/sarif-replay.dg/2.1.0-valid/malloc-vs-local-4.c.sarif
+
+diff --git a/gcc/doc/libgdiagnostics/topics/logical-locations.rst b/gcc/doc/libgdiagnostics/topics/logical-locations.rst
+index 85900b6344f2..70bbb00c486d 100644
+--- a/gcc/doc/libgdiagnostics/topics/logical-locations.rst
++++ b/gcc/doc/libgdiagnostics/topics/logical-locations.rst
+@@ -88,6 +88,12 @@ source location
+    the SARIF logicalLocation ``decoratedName`` property
+    (SARIF v2.1.0 `§3.33.6 <https://docs.oasis-open.org/sarif/sarif/v2.1.0/errata01/os/sarif-v2.1.0-errata01-os-complete.html#_Toc141790975>`_).
+ 
++   Repeated calls to :func:`diagnostic_manager_new_logical_location` with
++   "equal" input values on the same :type:`diagnostic_manager` will return
++   the same instance of :type:`diagnostic_logical_location`.  "Equal" here
++   includes different string buffers that compare as equal with
++   :func:``strcmp`.
++
+ .. function:: void diagnostic_manager_debug_dump_logical_location (const diagnostic_manager *diag_mgr, \
+                                                                    const diagnostic_logical_location *loc, \
+                                                                    FILE *out)
+diff --git a/gcc/libgdiagnostics.cc b/gcc/libgdiagnostics.cc
+index 00f8fefe838e..126ba747f796 100644
+--- a/gcc/libgdiagnostics.cc
++++ b/gcc/libgdiagnostics.cc
+@@ -18,6 +18,7 @@ along with GCC; see the file COPYING3.  If not see
+ <http://www.gnu.org/licenses/>.  */
+ 
+ #include "config.h"
++#define INCLUDE_MAP
+ #define INCLUDE_VECTOR
+ #include "system.h"
+ #include "coretypes.h"
+@@ -43,6 +44,15 @@ public:
+   : m_str (str ? ::xstrdup (str) : nullptr)
+   {
+   }
++  owned_nullable_string (const owned_nullable_string &other)
++  : m_str (other.xstrdup ())
++  {
++  }
++  owned_nullable_string (owned_nullable_string &&other)
++  {
++    m_str = other.m_str;
++    other.m_str = nullptr;
++  }
+ 
+   ~owned_nullable_string ()
+   {
+@@ -62,6 +72,16 @@ public:
+     return m_str ? ::xstrdup (m_str) : nullptr;
+   }
+ 
++  bool
++  operator< (const owned_nullable_string &other) const
++  {
++    if (m_str && other.m_str)
++      return strcmp (m_str, other.m_str) < 0;
++    if (m_str == nullptr && other.m_str != nullptr)
++      return true;
++    return false;
++  }
++
+ private:
+   char *m_str;
+ };
+@@ -205,6 +225,23 @@ struct diagnostic_logical_location : public logical_location
+     return label_text::borrow (m_short_name.get_str ());
+   }
+ 
++  bool
++  operator< (const diagnostic_logical_location &other) const
++  {
++    if (m_kind < other.m_kind)
++      return true;
++    if (m_parent < other.m_parent)
++      return true;
++    if (m_short_name < other.m_short_name)
++      return true;
++    if (m_fully_qualified_name < other.m_fully_qualified_name)
++      return true;
++    if (m_decorated_name < other.m_decorated_name)
++      return true;
++
++    return false;
++  }
++
+ private:
+   enum diagnostic_logical_location_kind_t m_kind;
+   const diagnostic_logical_location *m_parent;
+@@ -445,6 +482,16 @@ public:
+ 			const char *fully_qualified_name,
+ 			const char *decorated_name)
+   {
++    /* Use m_logical_locs to "uniquify" instances.  */
++    diagnostic_logical_location key (kind,
++				     parent,
++				     short_name,
++				     fully_qualified_name,
++				     decorated_name);
++    auto iter = m_logical_locs.find (key);
++    if (iter != m_logical_locs.end ())
++      return (*iter).second.get ();
++
+     std::unique_ptr<diagnostic_logical_location> logical_loc
+       = ::make_unique<diagnostic_logical_location> (kind,
+ 						    parent,
+@@ -452,7 +499,9 @@ public:
+ 						    fully_qualified_name,
+ 						    decorated_name);
+     const diagnostic_logical_location *result = logical_loc.get ();
+-    m_logical_locs.push_back (std::move (logical_loc));
++    m_logical_locs.insert
++      (logical_locs_map_t::value_type (std::move (key),
++				       std::move (logical_loc)));
+     return result;
+   }
+ 
+@@ -552,7 +601,9 @@ private:
+   hash_map<nofree_string_hash, diagnostic_file *> m_str_to_file_map;
+   hash_map<int_hash<location_t, UNKNOWN_LOCATION, location_t (-1)>,
+ 	   diagnostic_physical_location *> m_location_t_map;
+-  std::vector<std::unique_ptr<diagnostic_logical_location>> m_logical_locs;
++  typedef std::map<diagnostic_logical_location,
++		   std::unique_ptr<diagnostic_logical_location>> logical_locs_map_t;
++  logical_locs_map_t m_logical_locs;
+   const diagnostic *m_current_diag;
+   const diagnostic_logical_location *m_prev_diag_logical_loc;
+   std::unique_ptr<edit_context> m_edit_context;
+@@ -758,8 +809,7 @@ struct diagnostic_execution_path : public diagnostic_path
+     const logical_location *logical_loc_b
+       = m_events[event_idx_b]->get_logical_location ();
+ 
+-    // TODO:
+-    /* Pointer equality, so we may want to uniqify logical loc ptrs.  */
++    /* Pointer equality, as we uniqify logical location instances.  */
+     return logical_loc_a == logical_loc_b;
+   }
+ 
+diff --git a/gcc/testsuite/libgdiagnostics.dg/test-logical-location.c b/gcc/testsuite/libgdiagnostics.dg/test-logical-location.c
+index d853983b2bcf..140891938970 100644
+--- a/gcc/testsuite/libgdiagnostics.dg/test-logical-location.c
++++ b/gcc/testsuite/libgdiagnostics.dg/test-logical-location.c
+@@ -19,6 +19,8 @@ PRINT "hello world!";
+ */
+ const int line_num = __LINE__ - 2;
+ 
++#include <assert.h>
++
+ int
+ main ()
+ {
+@@ -60,6 +62,17 @@ main ()
+   diagnostic_finish (d, "can't find %qs", "foo");
+   /* end quoted source */
+ 
++  /* Verify that creating a diagnostic_logical_location with equal values 
++     yields the same instance.  */
++  const diagnostic_logical_location *dup
++    = diagnostic_manager_new_logical_location (diag_mgr,
++					       DIAGNOSTIC_LOGICAL_LOCATION_KIND_FUNCTION,
++					       NULL, /* parent */
++					       "test_short_name",
++					       "test_qualified_name",
++					       "test_decorated_name");
++  assert (dup == logical_loc); 
++
+   return end_test ();
+ }
+ 
+diff --git a/gcc/testsuite/sarif-replay.dg/2.1.0-valid/malloc-vs-local-4.c.sarif b/gcc/testsuite/sarif-replay.dg/2.1.0-valid/malloc-vs-local-4.c.sarif
+new file mode 100644
+index 000000000000..5fd8e628b47d
+--- /dev/null
++++ b/gcc/testsuite/sarif-replay.dg/2.1.0-valid/malloc-vs-local-4.c.sarif
+@@ -0,0 +1,402 @@
++/* Test a replay of a .sarif file generated from GCC testsuite.
++
++   The dg directives were stripped out from the generated .sarif
++   to avoid confusing DejaGnu for this test.   */
++
++{"$schema": "https://docs.oasis-open.org/sarif/sarif/v2.1.0/errata01/os/schemas/sarif-schema-2.1.0.json",
++ "version": "2.1.0",
++ "runs": [{"tool": {"driver": {"name": "GNU C23",
++                               "fullName": "GNU C23 (GCC) version 15.0.0 20241211 (experimental) (x86_64-pc-linux-gnu)",
++                               "version": "15.0.0 20241211 (experimental)",
++                               "informationUri": "https://gcc.gnu.org/gcc-15/",
++                               "rules": [{"id": "-Wanalyzer-possible-null-dereference",
++                                          "helpUri": "https://gcc.gnu.org/onlinedocs/gcc/Static-Analyzer-Options.html#index-Wanalyzer-possible-null-dereference"},
++                                         {"id": "-Wanalyzer-double-free",
++                                          "helpUri": "https://gcc.gnu.org/onlinedocs/gcc/Static-Analyzer-Options.html#index-Wanalyzer-double-free"}]}},
++           "taxonomies": [{"name": "CWE",
++                           "version": "4.7",
++                           "organization": "MITRE",
++                           "shortDescription": {"text": "The MITRE Common Weakness Enumeration"},
++                           "taxa": [{"id": "690",
++                                     "helpUri": "https://cwe.mitre.org/data/definitions/690.html"},
++                                    {"id": "415",
++                                     "helpUri": "https://cwe.mitre.org/data/definitions/415.html"}]}],
++           "invocations": [{"arguments": ["./cc1",
++                                          "-quiet",
++                                          "-iprefix",
++                                          "/home/david/coding/gcc-newgit-more-taint/build-with-libgdiagnostics/gcc/../lib/gcc/x86_64-pc-linux-gnu/15.0.0/",
++                                          "-isystem",
++                                          "./include",
++                                          "-isystem",
++                                          "./include-fixed",
++                                          "/not/a/real/path/malloc-vs-local-4.c",
++                                          "-quiet",
++                                          "-dumpbase",
++                                          "malloc-vs-local-4.c",
++                                          "-dumpbase-ext",
++                                          ".c",
++                                          "-mtune=generic",
++                                          "-march=x86-64",
++                                          "-fanalyzer",
++                                          "-fdiagnostics-add-output=sarif",
++                                          "-o",
++                                          "malloc-vs-local-4.s"],
++                            "workingDirectory": {"uri": "/home/david/coding/gcc-newgit-more-taint/build-with-libgdiagnostics/gcc"},
++                            "startTimeUtc": "2024-12-12T22:09:12Z",
++                            "executionSuccessful": true,
++                            "toolExecutionNotifications": [],
++                            "endTimeUtc": "2024-12-12T22:09:12Z"}],
++           "originalUriBaseIds": {"PWD": {"uri": "file:///home/david/coding/gcc-newgit-more-taint/build-with-libgdiagnostics/gcc/"}},
++           "artifacts": [{"location": {"uri": "/not/a/real/path/malloc-vs-local-4.c",
++                                       "uriBaseId": "PWD"},
++                          "sourceLanguage": "c",
++                          "contents": {"text": "#include <stdlib.h>\n\nvoid __attribute__((noinline)) callee_1 (int *ptr)\n{\n  *ptr = 42; \n}\n\nint test_1 (int i, int flag)\n{\n  /* Double diamond CFG; either use &i, or a malloc-ed buffer.  */\n  int *ptr = &i;\n  if (flag)\n    ptr = (int *)malloc (sizeof (int));\n  callee_1 (ptr);\n  if (flag)\n    free (ptr);\n  return i;\n}\n\nvoid __attribute__((noinline)) callee_2 (int *ptr)\n{\n  *ptr = 42;\n}\n\nint test_2 (int flag)\n{\n  int i;\n\n  if (flag)\n    callee_2 (&i);\n\n  callee_2 (&i);\n\n  if (!flag)\n    {\n      void *ptr = malloc (16);\n      free (ptr);\n      free (ptr);\n    }\n}\n"},
++                          "roles": ["analysisTarget",
++                                    "tracedFile"]}],
++           "results": [{"ruleId": "-Wanalyzer-possible-null-dereference",
++                        "taxa": [{"id": "690",
++                                  "toolComponent": {"name": "cwe"}}],
++                        "properties": {"gcc/analyzer/saved_diagnostic/sm": "malloc",
++                                       "gcc/analyzer/saved_diagnostic/enode": 78,
++                                       "gcc/analyzer/saved_diagnostic/snode": 22,
++                                       "gcc/analyzer/saved_diagnostic/sval": "&HEAP_ALLOCATED_REGION(46)",
++                                       "gcc/analyzer/saved_diagnostic/state": "unchecked ({free})",
++                                       "gcc/analyzer/saved_diagnostic/idx": 1},
++                        "level": "warning",
++                        "message": {"text": "dereference of possibly-NULL ‘ptr’"},
++                        "locations": [{"physicalLocation": {"artifactLocation": {"uri": "/not/a/real/path/malloc-vs-local-4.c",
++                                                                                 "uriBaseId": "PWD"},
++                                                            "region": {"startLine": 5,
++                                                                       "startColumn": 3,
++                                                                       "endColumn": 12},
++                                                            "contextRegion": {"startLine": 5,
++                                                                              "snippet": {"text": "  *ptr = 42;\n"}}},
++                                       "logicalLocations": [{"name": "callee_1",
++                                                             "fullyQualifiedName": "callee_1",
++                                                             "decoratedName": "callee_1",
++                                                             "kind": "function"}]}],
++                        "codeFlows": [{"threadFlows": [{"id": "main",
++                                                        "locations": [{"properties": {"gcc/analyzer/checker_event/emission_id": "(1)",
++                                                                                      "gcc/analyzer/checker_event/kind": "EK_FUNCTION_ENTRY"},
++                                                                       "location": {"physicalLocation": {"artifactLocation": {"uri": "/not/a/real/path/malloc-vs-local-4.c",
++                                                                                                                              "uriBaseId": "PWD"},
++                                                                                                         "region": {"startLine": 8,
++                                                                                                                    "startColumn": 5,
++                                                                                                                    "endColumn": 11},
++                                                                                                         "contextRegion": {"startLine": 8,
++                                                                                                                           "snippet": {"text": "int test_1 (int i, int flag)\n"}}},
++                                                                                    "logicalLocations": [{"name": "test_1",
++                                                                                                          "fullyQualifiedName": "test_1",
++                                                                                                          "decoratedName": "test_1",
++                                                                                                          "kind": "function"}],
++                                                                                    "message": {"text": "entry to ‘test_1’"}},
++                                                                       "kinds": ["enter",
++                                                                                 "function"],
++                                                                       "nestingLevel": 1,
++                                                                       "executionOrder": 1},
++                                                                      {"properties": {"gcc/analyzer/checker_event/emission_id": "(2)",
++                                                                                      "gcc/analyzer/checker_event/kind": "EK_START_CFG_EDGE",
++                                                                                      "gcc/analyzer/superedge_event/superedge": {"kind": "SUPEREDGE_CFG_EDGE",
++                                                                                                                                 "src_idx": 13,
++                                                                                                                                 "dst_idx": 14,
++                                                                                                                                 "desc": "true (flags TRUE_VALUE) (has goto_locus)"}},
++                                                                       "location": {"physicalLocation": {"artifactLocation": {"uri": "/not/a/real/path/malloc-vs-local-4.c",
++                                                                                                                              "uriBaseId": "PWD"},
++                                                                                                         "region": {"startLine": 12,
++                                                                                                                    "startColumn": 6,
++                                                                                                                    "endColumn": 7},
++                                                                                                         "contextRegion": {"startLine": 12,
++                                                                                                                           "snippet": {"text": "  if (flag)\n"}}},
++                                                                                    "logicalLocations": [{"name": "test_1",
++                                                                                                          "fullyQualifiedName": "test_1",
++                                                                                                          "decoratedName": "test_1",
++                                                                                                          "kind": "function"}],
++                                                                                    "message": {"text": "following ‘true’ branch (when ‘flag != 0’)..."}},
++                                                                       "kinds": ["branch",
++                                                                                 "true"],
++                                                                       "nestingLevel": 1,
++                                                                       "executionOrder": 2},
++                                                                      {"properties": {"gcc/analyzer/checker_event/emission_id": "(3)",
++                                                                                      "gcc/analyzer/checker_event/kind": "EK_END_CFG_EDGE",
++                                                                                      "gcc/analyzer/superedge_event/superedge": {"kind": "SUPEREDGE_CFG_EDGE",
++                                                                                                                                 "src_idx": 13,
++                                                                                                                                 "dst_idx": 14,
++                                                                                                                                 "desc": "true (flags TRUE_VALUE) (has goto_locus)"}},
++                                                                       "location": {"physicalLocation": {"artifactLocation": {"uri": "/not/a/real/path/malloc-vs-local-4.c",
++                                                                                                                              "uriBaseId": "PWD"},
++                                                                                                         "region": {"startLine": 13,
++                                                                                                                    "startColumn": 18,
++                                                                                                                    "endColumn": 39},
++                                                                                                         "contextRegion": {"startLine": 13,
++                                                                                                                           "snippet": {"text": "    ptr = (int *)malloc (sizeof (int));\n"}}},
++                                                                                    "logicalLocations": [{"name": "test_1",
++                                                                                                          "fullyQualifiedName": "test_1",
++                                                                                                          "decoratedName": "test_1",
++                                                                                                          "kind": "function"}],
++                                                                                    "message": {"text": "...to here"}},
++                                                                       "kinds": ["branch",
++                                                                                 "true"],
++                                                                       "nestingLevel": 1,
++                                                                       "executionOrder": 3},
++                                                                      {"properties": {"gcc/analyzer/checker_event/emission_id": "(4)",
++                                                                                      "gcc/analyzer/checker_event/kind": "EK_STATE_CHANGE"},
++                                                                       "location": {"physicalLocation": {"artifactLocation": {"uri": "/not/a/real/path/malloc-vs-local-4.c",
++                                                                                                                              "uriBaseId": "PWD"},
++                                                                                                         "region": {"startLine": 13,
++                                                                                                                    "startColumn": 18,
++                                                                                                                    "endColumn": 39},
++                                                                                                         "contextRegion": {"startLine": 13,
++                                                                                                                           "snippet": {"text": "    ptr = (int *)malloc (sizeof (int));\n"}}},
++                                                                                    "logicalLocations": [{"name": "test_1",
++                                                                                                          "fullyQualifiedName": "test_1",
++                                                                                                          "decoratedName": "test_1",
++                                                                                                          "kind": "function"}],
++                                                                                    "message": {"text": "this call could return NULL"}},
++                                                                       "kinds": ["acquire",
++                                                                                 "memory"],
++                                                                       "nestingLevel": 1,
++                                                                       "executionOrder": 4},
++                                                                      {"properties": {"gcc/analyzer/checker_event/emission_id": "(5)",
++                                                                                      "gcc/analyzer/checker_event/kind": "EK_CALL_EDGE",
++                                                                                      "gcc/analyzer/superedge_event/superedge": {"kind": "SUPEREDGE_CALL",
++                                                                                                                                 "src_idx": 15,
++                                                                                                                                 "dst_idx": 21,
++                                                                                                                                 "desc": "call"}},
++                                                                       "location": {"physicalLocation": {"artifactLocation": {"uri": "/not/a/real/path/malloc-vs-local-4.c",
++                                                                                                                              "uriBaseId": "PWD"},
++                                                                                                         "region": {"startLine": 14,
++                                                                                                                    "startColumn": 3,
++                                                                                                                    "endColumn": 17},
++                                                                                                         "contextRegion": {"startLine": 14,
++                                                                                                                           "snippet": {"text": "  callee_1 (ptr);\n"}}},
++                                                                                    "logicalLocations": [{"name": "test_1",
++                                                                                                          "fullyQualifiedName": "test_1",
++                                                                                                          "decoratedName": "test_1",
++                                                                                                          "kind": "function"}],
++                                                                                    "message": {"text": "calling ‘callee_1’ from ‘test_1’"}},
++                                                                       "kinds": ["call",
++                                                                                 "function"],
++                                                                       "nestingLevel": 1,
++                                                                       "executionOrder": 5},
++                                                                      {"properties": {"gcc/analyzer/checker_event/emission_id": "(6)",
++                                                                                      "gcc/analyzer/checker_event/kind": "EK_FUNCTION_ENTRY"},
++                                                                       "location": {"physicalLocation": {"artifactLocation": {"uri": "/not/a/real/path/malloc-vs-local-4.c",
++                                                                                                                              "uriBaseId": "PWD"},
++                                                                                                         "region": {"startLine": 3,
++                                                                                                                    "startColumn": 32,
++                                                                                                                    "endColumn": 40},
++                                                                                                         "contextRegion": {"startLine": 3,
++                                                                                                                           "snippet": {"text": "void __attribute__((noinline)) callee_1 (int *ptr)\n"}}},
++                                                                                    "logicalLocations": [{"name": "callee_1",
++                                                                                                          "fullyQualifiedName": "callee_1",
++                                                                                                          "decoratedName": "callee_1",
++                                                                                                          "kind": "function"}],
++                                                                                    "message": {"text": "entry to ‘callee_1’"}},
++                                                                       "kinds": ["enter",
++                                                                                 "function"],
++                                                                       "nestingLevel": 2,
++                                                                       "executionOrder": 6},
++                                                                      {"properties": {"gcc/analyzer/checker_event/emission_id": "(7)",
++                                                                                      "gcc/analyzer/checker_event/kind": "EK_WARNING"},
++                                                                       "location": {"physicalLocation": {"artifactLocation": {"uri": "/not/a/real/path/malloc-vs-local-4.c",
++                                                                                                                              "uriBaseId": "PWD"},
++                                                                                                         "region": {"startLine": 5,
++                                                                                                                    "startColumn": 3,
++                                                                                                                    "endColumn": 12},
++                                                                                                         "contextRegion": {"startLine": 5,
++                                                                                                                           "snippet": {"text": "  *ptr = 42;\n"}}},
++                                                                                    "logicalLocations": [{"name": "callee_1",
++                                                                                                          "fullyQualifiedName": "callee_1",
++                                                                                                          "decoratedName": "callee_1",
++                                                                                                          "kind": "function"}],
++                                                                                    "message": {"text": "‘ptr’ could be NULL: unchecked value from [(4)](sarif:/runs/0/results/0/codeFlows/0/threadFlows/0/locations/3)"}},
++                                                                       "kinds": ["danger"],
++                                                                       "nestingLevel": 2,
++                                                                       "executionOrder": 7}]}]}]},
++                       {"ruleId": "-Wanalyzer-double-free",
++                        "taxa": [{"id": "415",
++                                  "toolComponent": {"name": "cwe"}}],
++                        "properties": {"gcc/analyzer/saved_diagnostic/sm": "malloc",
++                                       "gcc/analyzer/saved_diagnostic/enode": 39,
++                                       "gcc/analyzer/saved_diagnostic/snode": 6,
++                                       "gcc/analyzer/saved_diagnostic/sval": "&HEAP_ALLOCATED_REGION(46)",
++                                       "gcc/analyzer/saved_diagnostic/state": "freed",
++                                       "gcc/analyzer/saved_diagnostic/idx": 0},
++                        "level": "warning",
++                        "message": {"text": "double-‘free’ of ‘ptr’"},
++                        "locations": [{"physicalLocation": {"artifactLocation": {"uri": "/not/a/real/path/malloc-vs-local-4.c",
++                                                                                 "uriBaseId": "PWD"},
++                                                            "region": {"startLine": 38,
++                                                                       "startColumn": 7,
++                                                                       "endColumn": 17},
++                                                            "contextRegion": {"startLine": 38,
++                                                                              "snippet": {"text": "      free (ptr);\n"}}},
++                                       "logicalLocations": [{"name": "test_2",
++                                                             "fullyQualifiedName": "test_2",
++                                                             "decoratedName": "test_2",
++                                                             "kind": "function"}]}],
++                        "codeFlows": [{"threadFlows": [{"id": "main",
++                                                        "locations": [{"properties": {"gcc/analyzer/checker_event/emission_id": "(1)",
++                                                                                      "gcc/analyzer/checker_event/kind": "EK_START_CFG_EDGE",
++                                                                                      "gcc/analyzer/superedge_event/superedge": {"kind": "SUPEREDGE_CFG_EDGE",
++                                                                                                                                 "src_idx": 5,
++                                                                                                                                 "dst_idx": 6,
++                                                                                                                                 "desc": "true (flags TRUE_VALUE) (has goto_locus)"}},
++                                                                       "location": {"physicalLocation": {"artifactLocation": {"uri": "/not/a/real/path/malloc-vs-local-4.c",
++                                                                                                                              "uriBaseId": "PWD"},
++                                                                                                         "region": {"startLine": 34,
++                                                                                                                    "startColumn": 6,
++                                                                                                                    "endColumn": 7},
++                                                                                                         "contextRegion": {"startLine": 34,
++                                                                                                                           "snippet": {"text": "  if (!flag)\n"}}},
++                                                                                    "logicalLocations": [{"name": "test_2",
++                                                                                                          "fullyQualifiedName": "test_2",
++                                                                                                          "decoratedName": "test_2",
++                                                                                                          "kind": "function"}],
++                                                                                    "message": {"text": "following ‘true’ branch (when ‘flag == 0’)..."}},
++                                                                       "kinds": ["branch",
++                                                                                 "true"],
++                                                                       "nestingLevel": 1,
++                                                                       "executionOrder": 1},
++                                                                      {"properties": {"gcc/analyzer/checker_event/emission_id": "(2)",
++                                                                                      "gcc/analyzer/checker_event/kind": "EK_END_CFG_EDGE",
++                                                                                      "gcc/analyzer/superedge_event/superedge": {"kind": "SUPEREDGE_CFG_EDGE",
++                                                                                                                                 "src_idx": 5,
++                                                                                                                                 "dst_idx": 6,
++                                                                                                                                 "desc": "true (flags TRUE_VALUE) (has goto_locus)"}},
++                                                                       "location": {"physicalLocation": {"artifactLocation": {"uri": "/not/a/real/path/malloc-vs-local-4.c",
++                                                                                                                              "uriBaseId": "PWD"},
++                                                                                                         "region": {"startLine": 36,
++                                                                                                                    "startColumn": 19,
++                                                                                                                    "endColumn": 30},
++                                                                                                         "contextRegion": {"startLine": 36,
++                                                                                                                           "snippet": {"text": "      void *ptr = malloc (16);\n"}}},
++                                                                                    "logicalLocations": [{"name": "test_2",
++                                                                                                          "fullyQualifiedName": "test_2",
++                                                                                                          "decoratedName": "test_2",
++                                                                                                          "kind": "function"}],
++                                                                                    "message": {"text": "...to here"}},
++                                                                       "kinds": ["branch",
++                                                                                 "true"],
++                                                                       "nestingLevel": 1,
++                                                                       "executionOrder": 2},
++                                                                      {"properties": {"gcc/analyzer/checker_event/emission_id": "(3)",
++                                                                                      "gcc/analyzer/checker_event/kind": "EK_STATE_CHANGE"},
++                                                                       "location": {"physicalLocation": {"artifactLocation": {"uri": "/not/a/real/path/malloc-vs-local-4.c",
++                                                                                                                              "uriBaseId": "PWD"},
++                                                                                                         "region": {"startLine": 36,
++                                                                                                                    "startColumn": 19,
++                                                                                                                    "endColumn": 30},
++                                                                                                         "contextRegion": {"startLine": 36,
++                                                                                                                           "snippet": {"text": "      void *ptr = malloc (16);\n"}}},
++                                                                                    "logicalLocations": [{"name": "test_2",
++                                                                                                          "fullyQualifiedName": "test_2",
++                                                                                                          "decoratedName": "test_2",
++                                                                                                          "kind": "function"}],
++                                                                                    "message": {"text": "allocated here"}},
++                                                                       "kinds": ["acquire",
++                                                                                 "memory"],
++                                                                       "nestingLevel": 1,
++                                                                       "executionOrder": 3},
++                                                                      {"properties": {"gcc/analyzer/checker_event/emission_id": "(4)",
++                                                                                      "gcc/analyzer/checker_event/kind": "EK_STATE_CHANGE"},
++                                                                       "location": {"physicalLocation": {"artifactLocation": {"uri": "/not/a/real/path/malloc-vs-local-4.c",
++                                                                                                                              "uriBaseId": "PWD"},
++                                                                                                         "region": {"startLine": 37,
++                                                                                                                    "startColumn": 7,
++                                                                                                                    "endColumn": 17},
++                                                                                                         "contextRegion": {"startLine": 37,
++                                                                                                                           "snippet": {"text": "      free (ptr);\n"}}},
++                                                                                    "logicalLocations": [{"name": "test_2",
++                                                                                                          "fullyQualifiedName": "test_2",
++                                                                                                          "decoratedName": "test_2",
++                                                                                                          "kind": "function"}],
++                                                                                    "message": {"text": "first ‘free’ here"}},
++                                                                       "kinds": ["release",
++                                                                                 "memory"],
++                                                                       "nestingLevel": 1,
++                                                                       "executionOrder": 4},
++                                                                      {"properties": {"gcc/analyzer/checker_event/emission_id": "(5)",
++                                                                                      "gcc/analyzer/checker_event/kind": "EK_WARNING"},
++                                                                       "location": {"physicalLocation": {"artifactLocation": {"uri": "/not/a/real/path/malloc-vs-local-4.c",
++                                                                                                                              "uriBaseId": "PWD"},
++                                                                                                         "region": {"startLine": 38,
++                                                                                                                    "startColumn": 7,
++                                                                                                                    "endColumn": 17},
++                                                                                                         "contextRegion": {"startLine": 38,
++                                                                                                                           "snippet": {"text": "      free (ptr);\n"}}},
++                                                                                    "logicalLocations": [{"name": "test_2",
++                                                                                                          "fullyQualifiedName": "test_2",
++                                                                                                          "decoratedName": "test_2",
++                                                                                                          "kind": "function"}],
++                                                                                    "message": {"text": "second ‘free’ here; first ‘free’ was at [(4)](sarif:/runs/0/results/1/codeFlows/0/threadFlows/0/locations/3)"}},
++                                                                       "kinds": ["danger"],
++                                                                       "nestingLevel": 1,
++                                                                       "executionOrder": 5}]}]}]}]}]}
++// TODO: show the CWEs
++// TODO: fix URL in message
++
++/* { dg-begin-multiline-output "" }
++In function 'callee_1':
++/not/a/real/path/malloc-vs-local-4.c:5:3: warning: dereference of possibly-NULL ‘ptr’ [-Wanalyzer-possible-null-dereference]
++    5 |   *ptr = 42;
++      |   ^~~~~~~~~~
++  'test_1': events 1-5
++    |
++    |    8 | int test_1 (int i, int flag)
++    |      |     ^~~~~~~
++    |      |     |
++    |      |     (1) entry to ‘test_1’
++    |......
++    |   12 |   if (flag)
++    |      |      ~~
++    |      |      |
++    |      |      (2) following ‘true’ branch (when ‘flag != 0’)...
++    |   13 |     ptr = (int *)malloc (sizeof (int));
++    |      |                  ~~~~~~~~~~~~~~~~~~~~~~
++    |      |                  |
++    |      |                  (3) ...to here
++    |      |                  (4) this call could return NULL
++    |   14 |   callee_1 (ptr);
++    |      |   ~~~~~~~~~~~~~~~
++    |      |   |
++    |      |   (5) calling ‘callee_1’ from ‘test_1’
++    |
++    +--> 'callee_1': events 6-7
++           |
++           |    3 | void __attribute__((noinline)) callee_1 (int *ptr)
++           |      |                                ^~~~~~~~~
++           |      |                                |
++           |      |                                (6) entry to ‘callee_1’
++           |    4 | {
++           |    5 |   *ptr = 42;
++           |      |   ~~~~~~~~~~                    
++           |      |   |
++           |      |   (7) ‘ptr’ could be NULL: unchecked value from [(4)](sarif:/runs/0/results/0/codeFlows/0/threadFlows/0/locations/3)
++           |
++   { dg-end-multiline-output "" } */
++/* { dg-begin-multiline-output "" }
++In function 'test_2':
++/not/a/real/path/malloc-vs-local-4.c:38:7: warning: double-‘free’ of ‘ptr’ [-Wanalyzer-double-free]
++   38 |       free (ptr);
++      |       ^~~~~~~~~~~
++  'test_2': events 1-5
++   34 |   if (!flag)
++      |      ^~
++      |      |
++      |      (1) following ‘true’ branch (when ‘flag == 0’)...
++   35 |     {
++   36 |       void *ptr = malloc (16);
++      |                   ~~~~~~~~~~~~
++      |                   |
++      |                   (2) ...to here
++      |                   (3) allocated here
++   37 |       free (ptr);
++      |       ~~~~~~~~~~~
++      |       |
++      |       (4) first ‘free’ here
++   38 |       free (ptr);
++      |       ~~~~~~~~~~~
++      |       |
++      |       (5) second ‘free’ here; first ‘free’ was at [(4)](sarif:/runs/0/results/1/codeFlows/0/threadFlows/0/locations/3)
++   { dg-end-multiline-output "" } */
+diff --git a/gcc/testsuite/sarif-replay.dg/2.1.0-valid/signal-1.c.moved.sarif b/gcc/testsuite/sarif-replay.dg/2.1.0-valid/signal-1.c.moved.sarif
+index eabab5a68cd3..f0026de12da4 100644
+--- a/gcc/testsuite/sarif-replay.dg/2.1.0-valid/signal-1.c.moved.sarif
++++ b/gcc/testsuite/sarif-replay.dg/2.1.0-valid/signal-1.c.moved.sarif
+@@ -167,20 +167,19 @@
+ 
+ // TODO: show the CWE
+ /* { dg-begin-multiline-output "" }
++In function 'custom_logger':
+ signal-1.c:13:3: warning: call to ‘fprintf’ from within signal handler [-Wanalyzer-unsafe-call-within-signal-handler]
+    13 |   fprintf(stderr, "LOG: %s", msg);
+       |   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-  'main': event 1
++  'main': events 1-2
+     |
+     |   21 | int main(int argc, const char *argv)
+     |      |     ^~~~~
+     |      |     |
+     |      |     (1) entry to ‘main’
+-    |
+-  'main': event 2
+-    |
++    |......
+     |   25 |   signal(SIGINT, handler);
+-    |      |   ^~~~~~~~~~~~~~~~~~~~~~~~
++    |      |   ~~~~~~~~~~~~~~~~~~~~~~~~
+     |      |   |
+     |      |   (2) registering ‘handler’ as signal handler
+     |
+@@ -189,31 +188,27 @@ signal-1.c:13:3: warning: call to ‘fprintf’ from within signal handler [-Wan
+     |GNU C17:
+     | (3): later on, when the signal is delivered to the process
+     |
+-    +--> 'handler': event 4
++    +--> 'handler': events 4-5
+            |
+            |   16 | static void handler(int signum)
+            |      |             ^~~~~~~~
+            |      |             |
+            |      |             (4) entry to ‘handler’
+-           |
+-         'handler': event 5
+-           |
++           |   17 | {
+            |   18 |   custom_logger("got signal");
+-           |      |   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~
++           |      |   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+            |      |   |
+            |      |   (5) calling ‘custom_logger’ from ‘handler’
+            |
+-           +--> 'custom_logger': event 6
++           +--> 'custom_logger': events 6-7
+                   |
+                   |   11 | void custom_logger(const char *msg)
+                   |      |      ^~~~~~~~~~~~~~
+                   |      |      |
+                   |      |      (6) entry to ‘custom_logger’
+-                  |
+-                'custom_logger': event 7
+-                  |
++                  |   12 | {
+                   |   13 |   fprintf(stderr, "LOG: %s", msg);
+-                  |      |   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
++                  |      |   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+                   |      |   |
+                   |      |   (7) call to ‘fprintf’ from within signal handler
+                   |
+diff --git a/gcc/testsuite/sarif-replay.dg/2.1.0-valid/signal-1.c.sarif b/gcc/testsuite/sarif-replay.dg/2.1.0-valid/signal-1.c.sarif
+index 81ac149e1253..e2f316b972e9 100644
+--- a/gcc/testsuite/sarif-replay.dg/2.1.0-valid/signal-1.c.sarif
++++ b/gcc/testsuite/sarif-replay.dg/2.1.0-valid/signal-1.c.sarif
+@@ -165,20 +165,19 @@
+ 
+ // TODO: show the CWE
+ /* { dg-begin-multiline-output "" }
++In function 'custom_logger':
+ ../../src/gcc/testsuite/gcc.dg/analyzer/signal-1.c:13:3: warning: call to ‘fprintf’ from within signal handler [-Wanalyzer-unsafe-call-within-signal-handler]
+    13 |   fprintf(stderr, "LOG: %s", msg);
+       |   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-  'main': event 1
++  'main': events 1-2
+     |
+     |   21 | int main(int argc, const char *argv)
+     |      |     ^~~~~
+     |      |     |
+     |      |     (1) entry to ‘main’
+-    |
+-  'main': event 2
+-    |
++    |......
+     |   25 |   signal(SIGINT, handler);
+-    |      |   ^~~~~~~~~~~~~~~~~~~~~~~~
++    |      |   ~~~~~~~~~~~~~~~~~~~~~~~~
+     |      |   |
+     |      |   (2) registering ‘handler’ as signal handler
+     |
+@@ -187,31 +186,27 @@
+     |GNU C17:
+     | (3): later on, when the signal is delivered to the process
+     |
+-    +--> 'handler': event 4
++    +--> 'handler': events 4-5
+            |
+            |   16 | static void handler(int signum)
+            |      |             ^~~~~~~~
+            |      |             |
+            |      |             (4) entry to ‘handler’
+-           |
+-         'handler': event 5
+-           |
++           |   17 | {
+            |   18 |   custom_logger("got signal");
+-           |      |   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~
++           |      |   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+            |      |   |
+            |      |   (5) calling ‘custom_logger’ from ‘handler’
+            |
+-           +--> 'custom_logger': event 6
++           +--> 'custom_logger': events 6-7
+                   |
+                   |   11 | void custom_logger(const char *msg)
+                   |      |      ^~~~~~~~~~~~~~
+                   |      |      |
+                   |      |      (6) entry to ‘custom_logger’
+-                  |
+-                'custom_logger': event 7
+-                  |
++                  |   12 | {
+                   |   13 |   fprintf(stderr, "LOG: %s", msg);
+-                  |      |   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
++                  |      |   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+                   |      |   |
+                   |      |   (7) call to ‘fprintf’ from within signal handler
+                   |
+diff --git a/gcc/testsuite/sarif-replay.dg/2.1.0-valid/spec-example-4.sarif b/gcc/testsuite/sarif-replay.dg/2.1.0-valid/spec-example-4.sarif
+index 84d3f887cefd..60c87314e1c8 100644
+--- a/gcc/testsuite/sarif-replay.dg/2.1.0-valid/spec-example-4.sarif
++++ b/gcc/testsuite/sarif-replay.dg/2.1.0-valid/spec-example-4.sarif
+@@ -749,15 +749,8 @@
+ /* { dg-begin-multiline-output "" }
+ In function 'collections::list::add':
+ collections/list.h:15:9: error: Variable "ptr" was used without being initialized. It was declared [here](0). [C2001]
+-  event 1
+-    |
+-    |
+-  event 2
+-    |
+-    |
+-  event 3
+-    |
+-    |
++  events 1-3
++......
+    { dg-end-multiline-output "" } */
+ /* { dg-begin-multiline-output "" }
+ collections/list.h:8:5: note: Variable "ptr" was declared here.
+-- 
+2.26.3
+
