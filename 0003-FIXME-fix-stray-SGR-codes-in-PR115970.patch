@@ -1,0 +1,38 @@
+From feff795efb8bb3c6e00c537d3f0b0a5ede3e0e36 Mon Sep 17 00:00:00 2001
+From: David Malcolm <dmalcolm@redhat.com>
+Date: Wed, 17 Sep 2025 15:46:03 -0400
+Subject: [PATCH 3/4] FIXME: fix stray SGR codes in PR115970
+
+---
+ gcc/diagnostics/sarif-sink.cc | 15 ++++++++-------
+ 1 file changed, 8 insertions(+), 7 deletions(-)
+
+diff --git a/gcc/diagnostics/sarif-sink.cc b/gcc/diagnostics/sarif-sink.cc
+index f255c9e1d032..aaef1152df7f 100644
+--- a/gcc/diagnostics/sarif-sink.cc
++++ b/gcc/diagnostics/sarif-sink.cc
+@@ -4533,13 +4533,14 @@ maybe_open_sarif_sink_for_socket (context &dc)
+   sarif_generation_options sarif_gen_opts;
+   sarif_gen_opts.m_version = sarif_version::v2_1_0;
+ 
+-  dc.add_sink
+-    (std::make_unique<sarif_socket_sink>
+-     (dc,
+-      line_table,
+-      std::make_unique <sarif_serialization_format_json> (true),
+-      sarif_gen_opts,
+-      sfd));
++  auto sink_ = std::make_unique<sarif_socket_sink>
++    (dc,
++     line_table,
++     std::make_unique <sarif_serialization_format_json> (true),
++     sarif_gen_opts,
++     sfd);;
++  sink_->update_printer ();
++  dc.add_sink (std::move (sink_));
+ }
+ 
+ #if CHECKING_P
+-- 
+2.26.3
+

@@ -1,0 +1,42 @@
+From ac5292e751e0e59a9973310f87061ea7d2b7da45 Mon Sep 17 00:00:00 2001
+From: David Malcolm <dmalcolm@redhat.com>
+Date: Wed, 17 Sep 2025 15:59:34 -0400
+Subject: [PATCH 4/4] FIXME: add man page entry for PR115970
+
+---
+ gcc/doc/invoke.texi | 19 +++++++++++++++++++
+ 1 file changed, 19 insertions(+)
+
+diff --git a/gcc/doc/invoke.texi b/gcc/doc/invoke.texi
+index ddeff790718c..50ee0bb378e4 100644
+--- a/gcc/doc/invoke.texi
++++ b/gcc/doc/invoke.texi
+@@ -38050,6 +38050,25 @@ setting @env{GCC_SARIF_LOG_PREFIX}.
+ @env{GCC_SARIF_LOG_PREFIX} controls the prefix used for filenames
+ when setting @env{GCC_SARIF_LOG_DIRECTORY}.
+ 
++@vindex SARIF_SOCKET
++@item SARIF_SOCKET
++If @env{SARIF_SOCKET} is set in the environment, then the
++compiler will attempt to connect to a UNIX domain stream socket with
++that name, and send an @code{OnSarifResult} JSON-RPC 2.0 notification to
++it for each diagnostic that occurs, where the value of the notification
++is a SARIF @code{result} object.
++
++The compiler will fail immediately if @env{SARIF_SOCKET} is set and
++it cannot connect to it.
++
++FIXME: what else should we specify here?
++FIXME: what are we leaving unsaid/unspecified?
++
++FIXME: would it be better to send a whole @code{run}, doing it in one go?
++FIXME: or some kind of protocol between producer and consumer?
++
++FIXME: do we want a way to request things like SARIF version, flags, etc?
++
+ @end table
+ 
+ @noindent
+-- 
+2.26.3
+

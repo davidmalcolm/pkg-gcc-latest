@@ -1,0 +1,172 @@
+From 3f9d836a3f71f32a736b2407a596be194117f053 Mon Sep 17 00:00:00 2001
+From: David Malcolm <dmalcolm@redhat.com>
+Date: Tue, 16 Sep 2025 14:54:39 -0400
+Subject: [PATCH 1/4] diagnostics: add GCC_SARIF_LOG_{DIRECTORY,PREFIX}
+ [PR117815]
+
+This patch adds a check for a new environment variable
+GCC_SARIF_LOG_DIRECTORY.  If set, then GCC will add an extra
+diagnostic output sink, writing to a file in
+GCC_SARIF_LOG_DIRECTORY.
+
+gcc/ChangeLog:
+	PR other/117815
+	* diagnostics/sarif-sink.cc (add_sarif_sink_in_directory): New.
+	* diagnostics/sarif-sink.h (add_sarif_sink_in_directory): New decl.
+	* doc/invoke.texi: Document GCC_SARIF_LOG_DIRECTORY and
+	GCC_SARIF_LOG_PREFIX.
+	* toplev.cc: Include "diagnostics/sarif-sink.h".
+	(toplev::main): Check for GCC_SARIF_LOG_DIRECTORY and
+	GCC_SARIF_LOG_PREFIX in the environment, and call
+	diagnostics::add_sarif_sink_in_directory if the former is set.
+---
+ gcc/diagnostics/sarif-sink.cc | 44 +++++++++++++++++++++++++++++++++++
+ gcc/diagnostics/sarif-sink.h  |  5 ++++
+ gcc/doc/invoke.texi           | 23 ++++++++++++++++++
+ gcc/toplev.cc                 | 11 +++++++++
+ 4 files changed, 83 insertions(+)
+
+diff --git a/gcc/diagnostics/sarif-sink.cc b/gcc/diagnostics/sarif-sink.cc
+index bc121388bb87..50565d8cb5f4 100644
+--- a/gcc/diagnostics/sarif-sink.cc
++++ b/gcc/diagnostics/sarif-sink.cc
+@@ -4375,6 +4375,50 @@ sarif_generation_options::dump (FILE *outfile, int indent) const
+   DIAGNOSTICS_DUMPING_EMIT_BOOL_FIELD (m_state_graph);
+ }
+ 
++/* Add another diagnostic sink to DC: write a SARIF file to DIR.
++   Attempt to generate a unique filename for that file of the form
++   "PREFIX-XXXXXX".  */
++
++void
++add_sarif_sink_in_directory (context &dc,
++			     const char *dir,
++			     const char *prefix)
++{
++  gcc_assert (line_table);
++  gcc_assert (dir);
++  gcc_assert (prefix);
++
++  if (access (dir, R_OK | W_OK | X_OK) < 0)
++    fatal_error (UNKNOWN_LOCATION,
++		 "unable to access %qs: %m", dir);
++
++  /* Ideally this would have a ".sarif" suffix, but mkstemp
++     requires the final 6 characters to be 'X'.  */
++  label_text filename = label_text::take (xasprintf ("%s/%s-XXXXXX",
++						     dir, prefix));
++  int fd = mkstemp (const_cast <char *> (filename.get ()));
++  if (fd < 0)
++    fatal_error (UNKNOWN_LOCATION,
++		 "unable to open %qs: %m", filename.get ());
++  FILE *outf = fdopen (fd, "wb");
++  if (!outf)
++    fatal_error (UNKNOWN_LOCATION, "fdopen failed: %m");
++  output_file outfile (outf, true, std::move (filename));
++
++  /* FIXME: should there be a way to specify other key/value
++     pairs here?  (as per -fdiagnostics-add-output, but as an
++     environment variable, perhaps).  */
++  sarif_generation_options sarif_gen_opts;
++  sarif_gen_opts.m_version = sarif_version::v2_1_0;
++
++  dc.add_sink
++    (make_sarif_sink
++     (dc, *line_table,
++      std::make_unique <sarif_serialization_format_json> (true),
++      sarif_gen_opts,
++      std::move (outfile)));
++}
++
+ #if CHECKING_P
+ 
+ namespace selftest {
+diff --git a/gcc/diagnostics/sarif-sink.h b/gcc/diagnostics/sarif-sink.h
+index e6f897b1f42e..4c9a7809238a 100644
+--- a/gcc/diagnostics/sarif-sink.h
++++ b/gcc/diagnostics/sarif-sink.h
+@@ -188,6 +188,11 @@ extern std::unique_ptr<sarif_edge>
+ make_sarif_edge (const digraphs::edge &e,
+ 		 sarif_builder *builder);
+ 
++extern void
++add_sarif_sink_in_directory (context &dc,
++			     const char *dir,
++			     const char *prefix);
++
+ } // namespace diagnostics
+ 
+ #endif /* ! GCC_DIAGNOSTICS_SARIF_SINK_H */
+diff --git a/gcc/doc/invoke.texi b/gcc/doc/invoke.texi
+index 3cf326cc22c3..ddeff790718c 100644
+--- a/gcc/doc/invoke.texi
++++ b/gcc/doc/invoke.texi
+@@ -6283,6 +6283,9 @@ also show a SARIF representation of the state.
+ 
+ @end table
+ 
++See also @env{GCC_SARIF_LOG_DIRECTORY} for a way of adding a SARIF
++output sink via an environment variable.
++
+ @end table
+ 
+ For example,
+@@ -38027,6 +38030,26 @@ As @code{fixits-v1}, but columns are expressed as display columns,
+ as per @option{-fdiagnostics-column-unit=display}.
+ @end table
+ 
++@vindex GCC_SARIF_LOG_DIRECTORY
++@item GCC_SARIF_LOG_DIRECTORY
++If @env{GCC_SARIF_LOG_DIRECTORY} is set in the environment, then the
++compiler will attempt to write a SARIF 2.1.0 log to a file within that
++directory, capturing metadata about the compiler invocation, and any
++diagnostics emitted within it.
++
++This SARIF output is in addition to the standard textual output on stderr,
++any diagnostic output sinks added with @option{-fdiagnostics-add-output=},
++or that set by @option{-fdiagnostics-set-output=}.
++
++By default the file is written to a tempfile of the form
++@file{gcc-@var{XXXXXX}}.  The prefix @code{gcc} can be changed by
++setting @env{GCC_SARIF_LOG_PREFIX}.
++
++@vindex GCC_SARIF_LOG_PREFIX
++@item GCC_SARIF_LOG_PREFIX
++@env{GCC_SARIF_LOG_PREFIX} controls the prefix used for filenames
++when setting @env{GCC_SARIF_LOG_DIRECTORY}.
++
+ @end table
+ 
+ @noindent
+diff --git a/gcc/toplev.cc b/gcc/toplev.cc
+index d26467450e37..462c19305ab4 100644
+--- a/gcc/toplev.cc
++++ b/gcc/toplev.cc
+@@ -83,6 +83,7 @@ along with GCC; see the file COPYING3.  If not see
+ #include "omp-offload.h"
+ #include "diagnostics/changes.h"
+ #include "diagnostics/file-cache.h"
++#include "diagnostics/sarif-sink.h"
+ #include "tree-pass.h"
+ #include "dumpfile.h"
+ #include "ipa-fnsummary.h"
+@@ -2352,6 +2353,16 @@ toplev::main (int argc, char **argv)
+ 
+   handle_common_deferred_options ();
+ 
++  if (const char *sarif_log_dir = getenv ("GCC_SARIF_LOG_DIRECTORY"))
++    {
++      const char *sarif_log_prefix = getenv ("GCC_SARIF_LOG_PREFIX");
++      if (!sarif_log_prefix)
++	sarif_log_prefix = "gcc";
++      diagnostics::add_sarif_sink_in_directory (*global_dc,
++						sarif_log_dir,
++						sarif_log_prefix);
++    }
++
+   init_local_tick ();
+ 
+   initialize_plugins ();
+-- 
+2.26.3
+

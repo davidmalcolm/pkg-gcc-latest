@@ -25,6 +25,11 @@ License:	GPLv3+ and GPLv3+ with exceptions and GPLv2+ with exceptions and LGPLv2
 URL:		https://gcc.gnu.org/
 Source0:	SOURCE_URL
 
+Patch1:	0001-diagnostics-add-GCC_SARIF_LOG_-DIRECTORY-PREFIX-PR11.patch
+Patch2:	0002-FIXME-WIP-on-SARIF-notifications-to-a-unix-domain-so.patch
+Patch3:	0003-FIXME-fix-stray-SGR-codes-in-PR115970.patch
+Patch4:	0004-FIXME-add-man-page-entry-for-PR115970.patch
+
 BuildRequires:	gcc, gcc-c++
 BuildRequires:	binutils >= 2.24
 BuildRequires:	zlib-devel, gettext, dejagnu, bison, flex
@@ -52,6 +57,10 @@ GNU C and C++ compilers built from a weekly development snapshot.
 
 %prep
 %setup -q -n BASENAME
+%patch 1 -p1
+%patch 2 -p1
+%patch 3 -p1
+%patch 4 -p1
 
 
 %build
@@ -123,6 +132,12 @@ done
 
 
 %changelog
+* Wed Sep 17 2025 David Malcolm <dmalcolm@redhat.com> - 16.0.0-pr115970
+- Add work-in-progress patches for
+  https://gcc.gnu.org/bugzilla/show_bug.cgi?id=115970
+  and https://gcc.gnu.org/bugzilla/show_bug.cgi?id=117815
+- Enable libgdiagnostics.
+
 * Thu Oct 24 2024 Jonathan Wakely <jwakely@redhat.com> - 15.0.0-5
 - Add BuildRequires: perl to fix man page generation
 

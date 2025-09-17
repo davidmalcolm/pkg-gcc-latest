@@ -1,0 +1,366 @@
+From 7d3a339007a5ed27b047423be1065838d093f8df Mon Sep 17 00:00:00 2001
+From: David Malcolm <dmalcolm@redhat.com>
+Date: Tue, 16 Sep 2025 16:10:39 -0400
+Subject: [PATCH 2/4] FIXME: WIP on SARIF notifications to a unix domain socket
+ (PR115970)
+
+---
+ gcc/Makefile.in               |  14 +++-
+ gcc/diagnostics/sarif-sink.cc | 127 +++++++++++++++++++++++++++++++++-
+ gcc/diagnostics/sarif-sink.h  |   3 +
+ gcc/sarif-listener.cc         |  96 +++++++++++++++++++++++++
+ gcc/toplev.cc                 |   2 +
+ 5 files changed, 239 insertions(+), 3 deletions(-)
+ create mode 100644 gcc/sarif-listener.cc
+
+diff --git a/gcc/Makefile.in b/gcc/Makefile.in
+index 4503dab60372..0fbe471b2f5f 100644
+--- a/gcc/Makefile.in
++++ b/gcc/Makefile.in
+@@ -142,6 +142,7 @@ LANGUAGES = c $(CONFIG_LANGUAGES)
+ ifeq (@enable_gcov@,yes)
+ LANGUAGES += gcov$(exeext) gcov-dump$(exeext) gcov-tool$(exeext)
+ endif
++LANGUAGES += sarif-listener(exeext)
+ 
+ # Default values for variables overridden in Makefile fragments.
+ # CFLAGS is for the user to override to, e.g., do a cross build with -O2.
+@@ -1308,6 +1309,8 @@ GCC_OBJS = gcc.o gcc-main.o ggc-none.o gcc-urlifier.o options-urls.o
+ 
+ SARIF_REPLAY_OBJS = sarif-replay.o libsarifreplay.o
+ 
++SARIF_LISTENER_OBJS = sarif-listener.o
++
+ c-family-warn = $(STRICT_WARN)
+ 
+ # Language-specific object files shared by all C-family front ends.
+@@ -1912,7 +1915,8 @@ ALL_HOST_BACKEND_OBJS = $(GCC_OBJS) $(OBJS) $(OBJS-libcommon) \
+   $(OBJS-libcommon-target) main.o c-family/cppspec.o \
+   $(COLLECT2_OBJS) $(EXTRA_GCC_OBJS) $(GCOV_OBJS) $(GCOV_DUMP_OBJS) \
+   $(GCOV_TOOL_OBJS) $(GENGTYPE_OBJS) gcc-ar.o gcc-nm.o gcc-ranlib.o \
+-  lto-wrapper.o collect-utils.o lockfile.o lto-ltrans-cache.o
++  lto-wrapper.o collect-utils.o lockfile.o lto-ltrans-cache.o \
++  $(SARIF_LISTENER_OBJS)
+ 
+ # for anything that is shared use the cc1plus profile data, as that
+ # is likely the most exercised during the build
+@@ -1930,6 +1934,8 @@ ifeq (@enable_libgdiagnostics@,yes)
+ ALL_HOST_OBJS += $(libgdiagnostics_OBJS) $(SARIF_REPLAY_OBJS)
+ endif
+ 
++ALL_HOST_OBJS += $(SARIF_LISTENER_OBJS)
++
+ # libbackend.a objs that might not be in some cases linked into the compiler,
+ # yet they are supposed to be part of the plugin ABI.  See PR116143.
+ EXTRA_BACKEND_OBJS = simple-diagnostic-path.o diagnostics/lazy-paths.o
+@@ -2458,6 +2464,12 @@ sarif-replay: $(SARIF_REPLAY_OBJS) $(LIBGDIAGNOSTICS_FILENAME)
+ 	+$(LINKER) $(ALL_LINKERFLAGS) $(LDFLAGS) -o $@ \
+ 	  $(SARIF_REPLAY_OBJS) $(LIBGDIAGNOSTICS_FILENAME) $(LIBS)
+ 
++sarif-listener(exeext): $(SARIF_LISTENER_OBJS) libcommon-target.a $(LIBDEPS) \
++	$(EXTRA_GCC_OBJS)
++	+$(LINKER) $(ALL_LINKERFLAGS) $(LDFLAGS) -o $@ $(SARIF_LISTENER_OBJS) \
++	  $(EXTRA_GCC_OBJS) libcommon-target.a \
++	  $(EXTRA_GCC_LIBS) $(LIBS)
++
+ # Dump a specs file to make -B./ read these specs over installed ones.
+ $(SPECS): xgcc$(exeext)
+ 	$(GCC_FOR_TARGET) -dumpspecs > tmp-specs
+diff --git a/gcc/diagnostics/sarif-sink.cc b/gcc/diagnostics/sarif-sink.cc
+index 50565d8cb5f4..f255c9e1d032 100644
+--- a/gcc/diagnostics/sarif-sink.cc
++++ b/gcc/diagnostics/sarif-sink.cc
+@@ -55,6 +55,8 @@ along with GCC; see the file COPYING3.  If not see
+ #include "demangle.h"
+ #include "backtrace.h"
+ #include "xml.h"
++#include <sys/un.h> // FIXME
++#include <sys/socket.h> // FIXME
+ 
+ namespace diagnostics {
+ 
+@@ -1915,7 +1917,8 @@ sarif_builder::emit_diagram (const diagram &d)
+   m_cur_group_result->on_diagram (d, *this);
+ }
+ 
+-/* Implementation of "end_group_cb" for SARIF output.  */
++/* Implementation of "end_group_cb" for SARIF output.
++   Append the current sarifResult to results, and set it to nullptr.  */
+ 
+ void
+ sarif_builder::end_group ()
+@@ -3938,7 +3941,7 @@ public:
+   {
+     /* No-op,  */
+   }
+-  void on_end_group () final override
++  void on_end_group () override
+   {
+     m_builder.end_group ();
+   }
+@@ -4050,6 +4053,86 @@ private:
+   output_file m_output_file;
+ };
+ 
++class sarif_socket_sink : public sarif_sink
++{
++public:
++  sarif_socket_sink (context &dc,
++		     const line_maps *line_maps,
++		     std::unique_ptr<sarif_serialization_format> serialization_format,
++		     const sarif_generation_options &sarif_gen_opts,
++		     int fd)
++  : sarif_sink (dc, line_maps,
++		std::move (serialization_format),
++		sarif_gen_opts),
++    m_fd (fd)
++  {
++  }
++  ~sarif_socket_sink ()
++  {
++    close (m_fd);
++  }
++  void dump_kind (FILE *out) const override
++  {
++    fprintf (out, "sarif_socket_sink: fd=%i", m_fd);
++  }
++  bool machine_readable_stderr_p () const final override
++  {
++    return false;
++  }
++
++  /* Rather than appending it to the results array, instead
++     send it to the output socket as a JSON-RPC 2.0 notification.  */
++  void on_end_group () final override
++  {
++    // FIXME: what about buffering
++
++    std::unique_ptr<sarif_result> result = m_builder.take_current_result ();
++    if (!result)
++      return;
++
++    auto notification = std::make_unique<json::object> ();
++    notification->set_string ("jsonrpc", "2.0");
++    notification->set_string ("method", "OnSarifResult");
++    {
++      auto params = std::make_unique<json::object> ();
++      params->set ("result", std::move (result));
++      notification->set ("params", std::move (params));
++    }
++
++    const bool formatted = false;
++    pretty_printer pp_content;
++    notification->print (&pp_content, formatted);
++    size_t content_length = strlen (pp_formatted_text (&pp_content));
++
++    pretty_printer pp_header;
++    pp_printf (&pp_header, "Content-Length: %li\n\n", content_length);
++    size_t header_length = strlen (pp_formatted_text (&pp_header));
++
++    size_t output_size = header_length + content_length;
++    char *buf = (char *)xmalloc (output_size);
++    memcpy (buf, pp_formatted_text (&pp_header), header_length);
++    memcpy (buf + header_length,
++	    pp_formatted_text (&pp_content),
++	    content_length);
++
++    // FIXME: should there be a trailing newline?
++
++    size_t written_sz = write (m_fd, buf, output_size);
++    if (written_sz != output_size)
++      {
++	fatal_error (UNKNOWN_LOCATION, "partial write");
++	/* FIXME: how to handle this???
++	   fatal_error will cause a re-entry to the error-reporting
++	   routines.  */
++      }
++
++    free (buf);
++  }
++
++private:
++  int m_fd;
++};
++
+ /* Print the start of an embedded link to PP, as per 3.11.6.  */
+ 
+ static void
+@@ -4419,6 +4502,46 @@ add_sarif_sink_in_directory (context &dc,
+       std::move (outfile)));
+ }
+ 
++void
++maybe_open_sarif_sink_for_socket (context &dc)
++{
++  gcc_assert (line_table);
++
++  const char * const env_var_name = "SARIF_SOCKET";
++  const char * const socket_name = getenv (env_var_name);
++  if (!socket_name)
++    return;
++
++  int sfd = socket (AF_UNIX, SOCK_STREAM, 0);
++  if (sfd == -1)
++    fatal_error (UNKNOWN_LOCATION,
++		 "unable to create socket");
++
++  struct sockaddr_un addr;
++  memset (&addr, 0, sizeof (addr));
++  addr.sun_family = AF_UNIX;
++  strncpy (addr.sun_path, socket_name, sizeof (addr.sun_path) - 1);
++
++  if (connect (sfd, (struct sockaddr *)&addr, sizeof (addr)) == -1)
++    fatal_error (UNKNOWN_LOCATION,
++		 "unable to connect to %qs",
++		 socket_name);
++
++  /* FIXME: should there be a way to specify other key/value
++     pairs here?  (as per -fdiagnostics-add-output, but as an
++     environment variable, perhaps).  */
++  sarif_generation_options sarif_gen_opts;
++  sarif_gen_opts.m_version = sarif_version::v2_1_0;
++
++  dc.add_sink
++    (std::make_unique<sarif_socket_sink>
++     (dc,
++      line_table,
++      std::make_unique <sarif_serialization_format_json> (true),
++      sarif_gen_opts,
++      sfd));
++}
++
+ #if CHECKING_P
+ 
+ namespace selftest {
+diff --git a/gcc/diagnostics/sarif-sink.h b/gcc/diagnostics/sarif-sink.h
+index 4c9a7809238a..a62de6bd61db 100644
+--- a/gcc/diagnostics/sarif-sink.h
++++ b/gcc/diagnostics/sarif-sink.h
+@@ -193,6 +193,9 @@ add_sarif_sink_in_directory (context &dc,
+ 			     const char *dir,
+ 			     const char *prefix);
+ 
++extern void
++maybe_open_sarif_sink_for_socket (context &ctxt);
++
+ } // namespace diagnostics
+ 
+ #endif /* ! GCC_DIAGNOSTICS_SARIF_SINK_H */
+diff --git a/gcc/sarif-listener.cc b/gcc/sarif-listener.cc
+new file mode 100644
+index 000000000000..f5107bcd3c32
+--- /dev/null
++++ b/gcc/sarif-listener.cc
+@@ -0,0 +1,96 @@
++/* Example listener for SARIF output to a socket.
++   Copyright (C) 2024 Free Software Foundation, Inc.
++   Contributed by David Malcolm <dmalcolm@redhat.com>.
++
++This file is part of GCC.
++
++GCC is free software; you can redistribute it and/or modify it under
++the terms of the GNU General Public License as published by the Free
++Software Foundation; either version 3, or (at your option) any later
++version.
++
++GCC is distributed in the hope that it will be useful, but WITHOUT ANY
++WARRANTY; without even the implied warranty of MERCHANTABILITY or
++FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++for more details.
++
++You should have received a copy of the GNU General Public License
++along with GCC; see the file COPYING3.  If not see
++<http://www.gnu.org/licenses/>.  */
++
++
++#include "config.h"
++#include "system.h"
++#include "coretypes.h"
++#include "diagnostic.h"
++#include <sys/un.h> // FIXME
++#include <sys/socket.h> // FIXME
++
++/* FIXME.  */
++
++static const int BACKLOG = 5;
++#define BUF_SIZE 4096 /* FIXME */
++
++int
++main (int argc, char **argv)
++{
++  const char *p = argv[0] + strlen (argv[0]);
++  while (p != argv[0] && !IS_DIR_SEPARATOR (p[-1]))
++    --p;
++  progname = p;
++  diagnostic_initialize (global_dc, 0);
++
++  const char * const env_var_name = "SARIF_SOCKET";
++  const char * const socket_path = getenv (env_var_name);
++  if (!socket_path)
++    fatal_error (UNKNOWN_LOCATION,
++		 "environment variable %qs not set",
++		 env_var_name);
++
++  int sfd = socket (AF_UNIX, SOCK_STREAM, 0);
++  if (sfd == -1)
++    fatal_error (UNKNOWN_LOCATION,
++		 "unable to create socket");
++
++  struct sockaddr_un addr;
++  if (strlen (socket_path) > sizeof (addr.sun_path) - 1)
++    fatal_error (UNKNOWN_LOCATION,
++		 "socket path too long: %qs", socket_path);
++
++  if (remove (socket_path) == -1 && errno != ENOENT)
++    fatal_error (UNKNOWN_LOCATION,
++		 "socket %qs already exists", socket_path);
++
++  memset (&addr, 0, sizeof (addr));
++  addr.sun_family = AF_UNIX;
++  strncpy (addr.sun_path, socket_path, sizeof (addr.sun_path) - 1);
++
++  if (bind (sfd, (struct sockaddr *)&addr, sizeof (addr)) == -1)
++    fatal_error (UNKNOWN_LOCATION,
++		 "unable to bind to %qs", socket_path);
++
++  if (listen (sfd, BACKLOG) == -1)
++    fatal_error (UNKNOWN_LOCATION,
++		 "unable to listen to %qs", socket_path);
++
++  while (1)
++    {
++      int cfd = accept (sfd, nullptr, nullptr);
++      if (cfd == -1)
++	fatal_error (UNKNOWN_LOCATION,
++		     "accept failed");
++
++      ssize_t sz_read;
++      char buf[BUF_SIZE];
++      while ((sz_read = read (cfd, buf, BUF_SIZE)) > 0)
++	if (write (1, buf, sz_read) != sz_read)
++	  fatal_error (UNKNOWN_LOCATION,
++		       "partial/failed write");
++      if (sz_read == -1)
++	fatal_error (UNKNOWN_LOCATION,
++		     "error reading from client");
++      if (close (cfd) == -1)
++	fatal_error (UNKNOWN_LOCATION,
++		     "error closing client fd");
++    }
++}
+diff --git a/gcc/toplev.cc b/gcc/toplev.cc
+index 462c19305ab4..f451177195c8 100644
+--- a/gcc/toplev.cc
++++ b/gcc/toplev.cc
+@@ -2363,6 +2363,8 @@ toplev::main (int argc, char **argv)
+ 						sarif_log_prefix);
+     }
+ 
++  diagnostics::maybe_open_sarif_sink_for_socket (*global_dc);
++
+   init_local_tick ();
+ 
+   initialize_plugins ();
+-- 
+2.26.3
+
