@@ -100,7 +100,8 @@ CC="$CC" CXX="$CXX" CFLAGS="$OPT_FLAGS" CXXFLAGS="$OPT_FLAGS" \
 %ifarch x86_64 && 0%{?rhel} > 8
   --with-arch_64=x86-64-v2 \
 %endif
-  --with-bugurl=https://gcc.gnu.org/bugzilla
+  --with-bugurl=https://gcc.gnu.org/bugzilla \
+  --enable-libgdiagnostics --enable-host-shared
 
 make %{?_smp_mflags}
 
